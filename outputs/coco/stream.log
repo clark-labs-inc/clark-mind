@@ -1,0 +1,36 @@
+
+==== stream COCO captions limit=4000 order=6 Tue Jun  9 20:17:23 2026 ====
+  codec fit on 1500 imgs (11s)
+STREAM COMPLETE: 4000 rows, states=451273, final caption bits/char=2.142  (73s)
+
+=== image -> caption samples (held-out) ===
+  REAL: 'a bathroom that has a small little toilet in it'   ->  GEN: 'a man is holding a baseball game of stre'
+  REAL: 'a small young elephant stands under its mother.'   ->  GEN: 'a black and white bathroom with a big pi'
+  REAL: 'a cat on a bed partially inside a canvas bag'   ->  GEN: 'a tennis playing down a snowy surface.'
+  REAL: 'a black and yellow airplane flying and some tree'   ->  GEN: 'a small boy is throwing on top of a buil'
+  REAL: 'a leafy plant with a single blooming flower.'   ->  GEN: 'a man is holding a street corner of a ca'
+  REAL: 'two horses have feathers on their head.'   ->  GEN: 'a small bat at a park bench with two men'
+  wrote outputs/coco/caption2image.png, recon.png
+  scaling (rows, bits/char): []
+==== DONE 73s ====
+
+==== stream COCO captions limit=30000 order=6 Tue Jun  9 20:22:24 2026 ====
+  codec fit on 2500 imgs (39s)
+  streamed 5000/30000  states=548162  heldout_caption_bits/char=2.114  (102s)
+  streamed 10000/30000  states=989327  heldout_caption_bits/char=1.953  (316s)
+  streamed 15000/30000  states=1404949  heldout_caption_bits/char=1.845  (368s)
+  streamed 20000/30000  states=1805438  heldout_caption_bits/char=1.790  (436s)
+  streamed 25000/30000  states=2197494  heldout_caption_bits/char=1.751  (535s)
+  streamed 30000/30000  states=2586039  heldout_caption_bits/char=1.712  (730s)
+STREAM COMPLETE: 30000 rows, states=2586039, final caption bits/char=1.712  (730s)
+
+=== image -> caption samples (held-out) ===
+  REAL: 'a desk is shown with two computers by a window.'   ->  GEN: 'a man is sitting on a bed and a toilet i'
+  REAL: 'a private airplane loading four passengers on a '   ->  GEN: 'a bathroom with a bathroom with a baseba'
+  REAL: 'fishermen stand among hundreds of boats on the s'   ->  GEN: 'a close up of people are standing in the'
+  REAL: 'a hair dresser using scissors to cut hair'   ->  GEN: 'a black and white toilet in a red bus is'
+  REAL: 'a picture of a wave at the ocean.'   ->  GEN: 'a skier is sitting on a bed with a sink '
+  REAL: 'an image of a plates of food at a mexican restau'   ->  GEN: 'a boy skateboard in the water and a chil'
+  wrote outputs/coco/caption2image.png, recon.png
+  scaling (rows, bits/char): [(5000, np.float64(2.1144967342503302)), (10000, np.float64(1.9529279457937112)), (15000, np.float64(1.844781696242844)), (20000, np.float64(1.7898406043809487)), (25000, np.float64(1.7506456244768016)), (30000, np.float64(1.7115539181377235))]
+==== DONE 731s ====

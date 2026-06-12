@@ -1,0 +1,22 @@
+/Users/stan/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+
+==== PSC-Omni-Real run scale=35000 aug=2 order=8 Tue Jun  9 20:04:45 2026 ====
+MNIST loaded n=35000  (2s)
+FSDD real speech: train=2700 test=300  (6s)
+codecs fit (vision 256, audio 256)  (7s)
+concepts fit  (18s)
+  built corpus 0/35000 seqs=9  (18s)
+  built corpus 5000/35000 seqs=45009  (19s)
+  built corpus 10000/35000 seqs=90009  (20s)
+  built corpus 15000/35000 seqs=135009  (21s)
+  built corpus 20000/35000 seqs=180009  (21s)
+  built corpus 25000/35000 seqs=225009  (22s)
+  built corpus 30000/35000 seqs=270009  (23s)
+corpus: 315000 sequences  (24s)
+OMNI MODEL FIT on 315000 seqs, states=3943515  (73s)
+
+=== RESULTS (no backprop) ===
+  REAL spoken-digit -> text (held-out FSDD, 300 clips): 50.0%
+  wrote outputs/omni_real/text2image.png, spoken2image.png
+==== DONE in 73s ====

@@ -1,0 +1,413 @@
+"""Heuristic-free generic agent: posterior-sampling RL over a hierarchical
+Bayesian world model (no backprop, and no hand-tuned exploration constants).
+--------------------------------------------------------------------------------
+ONE objective -- maximize expected discounted environment score under the
+posterior over worlds -- and every behavior is derived from it:
+
+  WORLD MODEL   per (state, action): Dirichlet posterior over next states with
+                an escape mass to the UNKNOWN (Chinese-restaurant style), and a
+                Beta posterior over P(score increase), whose PRIOR is the
+                posterior of the same action under the next-coarser state
+                abstraction (hierarchical Beta-Binomial chain over the
+                SigStack levels; the root is the global action posterior).
+                Backoff is not a rule here -- it is what a hierarchical prior
+                does when local evidence is scarce.
+
+  EXPLORATION   posterior SAMPLING (PSRL): sample one world from the
+                posterior, value-iterate it, act greedily. Uncertain pairs
+                sometimes sample as good -- that IS directed exploration.
+                Before any score evidence exists the sampled reward landscape
+                is flat ~0, and the only term left in expected utility is
+                INFORMATION: a second value iteration on the same sampled
+                world with information gain (1/(n+1), the expected entropy
+                reduction of a Dirichlet observation) as reward yields the
+                optimal info-seeking policy. No epsilon, no bonus weights:
+                reward value decides when it speaks; information decides when
+                reward is silent (their Q-gap below sampling noise).
+
+  RESAMPLING    UCRL2's parameter-free episode rule: resample the world when
+                any (s,a) has been visited as often within the episode as in
+                all history before it (doubling), or when an unvisited pair
+                is first tried.
+
+  PERCEPTION    Habituator (clock masking) decided by BAYES FACTOR between
+                "changes depend on cause" and "changes independent of cause",
+                masked at Jeffreys' decisive-evidence level -- no count or
+                share thresholds.
+
+The single fixed quantity is gamma (temporal preference = problem definition)
+and the unit Dirichlet/Beta concentration alpha=1 (uninformative).
+"""
+from __future__ import annotations
+from collections import Counter, defaultdict, deque
+import math
+import pickle
+import numpy as np
+
+from predictive_agent import SigStack
+
+ALPHA = 1.0                                  # unit (uninformative) concentration
+UNKNOWN = ("?",)                             # the escape pseudo-state
+
+
+class _Lvl:
+    """Counts at one resolution of the state abstraction."""
+    def __init__(self):
+        self.trans = {}                      # (s,a) -> Counter(next)
+        self.n = {}                          # (s,a) -> visits
+        self.pos = {}                        # (s,a) -> score-increase events
+
+    def learn(self, s, a, scored, ns):
+        k = (s, a)
+        self.n[k] = self.n.get(k, 0) + 1
+        if scored:
+            self.pos[k] = self.pos.get(k, 0) + 1
+        if ns is not None:
+            self.trans.setdefault(k, Counter())[ns] += 1
+
+
+class BayesAgent:
+    def __init__(self, actions, gamma=0.95, seed=0, names=None,
+                 max_pairs=100000, hab=None):
+        self.actions = list(actions)
+        self.gamma = gamma
+        self.rng = np.random.default_rng(seed)
+        self.names = names or {}
+        self.levels = [_Lvl()]               # fine first; grown by SigStacks
+        self.sighier = {}                    # fine sig -> full stack
+        self.avail = {}                      # sig -> offered actions
+        self.states = set()
+        self.mag = 0.0; self.magn = 0        # observed positive score magnitudes
+        self.gpos = defaultdict(int)         # action -> score events (root prior)
+        self.gn = defaultdict(int)
+        self.last = {}                       # recency for the resource bound
+        self.max_pairs = max_pairs
+        self.t = 0
+        # episode state (PSRL)
+        self.policy = {}                     # state -> action (greedy in sample)
+        self.ep_nu = Counter()               # within-episode visit counts
+        self.ep_base = {}                    # counts at sampling time
+        self.hab = hab                       # optional Habituator (adapter-fed)
+
+    # ----------------------------------------------------------- learning
+    def _intern(self, s):
+        if isinstance(s, SigStack):
+            while len(self.levels) < len(s):
+                self.levels.append(_Lvl())
+            self.sighier[s[0]] = tuple(s)
+            return s[0]
+        return s
+
+    def learn(self, sig, a, reward, next_sig, available=None):
+        sig = self._intern(sig)
+        next_sig = self._intern(next_sig) if next_sig is not None else None
+        scored = reward > 0
+        if scored:
+            self.mag += reward; self.magn += 1
+        h = self.sighier.get(sig, (sig,))
+        nh = self.sighier.get(next_sig, (next_sig,)) if next_sig is not None else None
+        for i, lv in enumerate(self.levels):
+            if i < len(h):
+                lv.learn(h[i], a, scored,
+                         nh[i] if nh is not None and i < len(nh) else None)
+        self.gpos[a] += int(scored); self.gn[a] += 1
+        if available is not None:
+            self.avail[sig] = tuple(available)
+        self.states.add(sig)
+        if next_sig is not None:
+            self.states.add(next_sig)
+        self.t += 1
+        self.last[(sig, a)] = self.t
+        # UCRL2 episode rule: doubling (or first visit) ends the episode
+        k = (sig, a)
+        self.ep_nu[k] += 1
+        if self.ep_nu[k] >= max(1, self.ep_base.get(k, 0)):
+            self.policy = {}                 # forces a fresh world sample
+        if self.max_pairs and len(self.levels[0].n) > self.max_pairs:
+            self.sleep()
+
+    def _acts(self, s):
+        return self.avail.get(s) or self.actions
+
+    # ------------------------------------------------------- PSRL sampling
+    def _sample_p(self, level_i, s, a):
+        """One Beta draw of P(score | (s,a) at level i); the prior mean is
+        the next-coarser key's posterior mean (hierarchical Beta-Binomial),
+        bottoming out at the global per-action posterior."""
+        lv = self.levels[level_i]
+        k = (s, a)
+        n, p = lv.n.get(k, 0), lv.pos.get(k, 0)
+        up = self._parents[level_i].get(s) if level_i < len(self._parents) else None
+        if up is not None and level_i + 1 < len(self.levels):
+            m = self._mean_chain(level_i + 1, up, a)
+        else:
+            m = (self.gpos[a] + ALPHA) / (self.gn[a] + 2 * ALPHA)
+        a1 = p + ALPHA * m
+        b1 = (n - p) + ALPHA * (1 - m)
+        return float(self.rng.beta(max(a1, 1e-6), max(b1, 1e-6)))
+
+    def _mean_chain(self, level_i, s, a):
+        """Posterior mean of P(score) at (s,a,level i), prior chained up."""
+        m = (self.gpos[a] + ALPHA) / (self.gn[a] + 2 * ALPHA)
+        keys = []
+        cur = s
+        for j in range(level_i, len(self.levels)):
+            keys.append((j, cur))
+            cur = self._parents[j].get(cur) if j < len(self._parents) else None
+            if cur is None:
+                break
+        for j, ks in reversed(keys):
+            lv = self.levels[j]
+            n, p = lv.n.get((ks, a), 0), lv.pos.get((ks, a), 0)
+            m = (p + ALPHA * m) / (n + ALPHA)
+        return m
+
+    def _sample_world(self, fine_states):
+        """Hierarchical PSRL: sample and value-iterate one world PER LEVEL,
+        coarse first. Each level's Dirichlet escape mass resolves to the
+        COARSER level's sampled Q for the same action (knowledge transfers
+        down the hierarchy as the prior); the root escapes to the UNKNOWN
+        closure. Two value functions per level: score, and information."""
+        gamma = self.gamma
+        L = len(self.levels)
+        # state sets, parent links and action sets per level
+        lvl_states = [set() for _ in range(L)]
+        parents = [{} for _ in range(L)]
+        lvl_acts = [defaultdict(set) for _ in range(L)]
+        for s in fine_states:
+            h = self.sighier.get(s, (s,))
+            acts = self._acts(s)
+            for i, hi in enumerate(h):
+                lvl_states[i].add(hi)
+                lvl_acts[i][hi].update(acts)
+                if i + 1 < len(h):
+                    parents[i][hi] = h[i + 1]
+        self._parents = parents
+        mag = (self.mag / self.magn) if self.magn else 0.0
+        r_u = float(self.rng.beta(ALPHA, ALPHA + self.t)) * mag
+        vu_r, vu_i = r_u / (1 - gamma), 1.0 / (1 - gamma)
+        Qr_up, Qi_up = {}, {}                # coarser level's sampled Q's
+        for i in range(L - 1, -1, -1):
+            lv = self.levels[i]
+            states = lvl_states[i]
+            Tr, Rw, Ig, Esc = {}, {}, {}, {}
+            for s in states:
+                up = parents[i].get(s)
+                for a in lvl_acts[i][s]:
+                    k = (s, a)
+                    tc = lv.trans.get(k)
+                    outs, w = [None], [self.rng.gamma(ALPHA)]   # None = escape
+                    if tc:
+                        for ns, c in tc.items():
+                            if ns in states:
+                                outs.append(ns); w.append(self.rng.gamma(c))
+                    w = np.asarray(w); w /= w.sum()
+                    Tr[k] = (outs, w)
+                    Rw[k] = self._sample_p(i, s, a) * mag
+                    Ig[k] = 1.0 / (lv.n.get(k, 0) + 1.0)
+                    Esc[k] = ((Qr_up.get((up, a), vu_r), Qi_up.get((up, a), vu_i))
+                              if up is not None else (vu_r, vu_i))
+            Vr, Vi = {}, {}
+            for which, (V, R) in enumerate(((Vr, Rw), (Vi, Ig))):
+                for _ in range(40):
+                    delta = 0.0
+                    for s in states:
+                        best = 0.0
+                        for a in lvl_acts[i][s]:
+                            k = (s, a)
+                            outs, w = Tr[k]
+                            ev = Esc[k][which]
+                            q = R[k] + gamma * sum(
+                                wi * (ev if o is None else V.get(o, ev))
+                                for o, wi in zip(outs, w))
+                            if q > best:
+                                best = q
+                        delta = max(delta, abs(best - V.get(s, 0.0)))
+                        V[s] = best
+                    if delta < 1e-4:
+                        break
+            Qr, Qi = {}, {}
+            for s in states:
+                for a in lvl_acts[i][s]:
+                    k = (s, a)
+                    outs, w = Tr[k]
+                    er, ei = Esc[k]
+                    Qr[k] = Rw[k] + gamma * sum(
+                        wi * (er if o is None else Vr.get(o, er))
+                        for o, wi in zip(outs, w))
+                    Qi[k] = Ig[k] + gamma * sum(
+                        wi * (ei if o is None else Vi.get(o, ei))
+                        for o, wi in zip(outs, w))
+            Qr_up, Qi_up = Qr, Qi
+            if i == 0:
+                # greedy policy: score decides when it speaks above its own
+                # sampling noise (a second independent draw); information
+                # decides when score is silent; residual ties break uniformly
+                pol = {}
+                for s in states:
+                    acts = list(lvl_acts[i][s])
+                    qr = {a: Qr[(s, a)] for a in acts}
+                    qi = {a: Qi[(s, a)] for a in acts}
+                    noise = max(abs(self._sample_p(0, s, a) * mag - Rw[(s, a)])
+                                for a in acts)
+                    top = max(qr.values())
+                    cand = [a for a in acts if top - qr[a] <= noise]
+                    ti = max(qi[a] for a in cand)
+                    cand = [a for a in cand if qi[a] >= ti - 1e-12]
+                    pol[s] = cand[int(self.rng.integers(len(cand)))]
+                self.policy = pol
+        self.ep_nu = Counter()
+        self.ep_base = dict(self.levels[0].n)
+
+    def act(self, sig, available, feats=None):
+        sig = self._intern(sig)
+        if available is not None:
+            self.avail[sig] = tuple(available)
+        if sig not in self.policy:
+            self._sample_world(self.states | {sig})
+        a = self.policy.get(sig)
+        if a is None or (available is not None and a not in available):
+            pool = list(available or self.actions)
+            a = pool[int(self.rng.integers(len(pool)))]
+        return a, {}, []
+
+    # --------------------------------------------------- bounded memory
+    def sleep(self):
+        """Resource bound (not a decision rule): evict the stalest pairs that
+        carry neither score evidence nor recent use; coarser levels keep the
+        gist."""
+        fine = self.levels[0]
+        keep = int(self.max_pairs * 0.7)
+        cand = [k for k in fine.n if not fine.pos.get(k)]
+        cand.sort(key=lambda k: self.last.get(k, 0))
+        for k in cand[:max(0, len(fine.n) - keep)]:
+            fine.n.pop(k, None); fine.pos.pop(k, None)
+            fine.trans.pop(k, None); self.last.pop(k, None)
+        alive = {s for s, _ in fine.n}
+        self.states &= alive
+        self.policy = {}
+
+    def save(self, path):
+        with open(path, "wb") as f:
+            pickle.dump({"levels": [lv.__dict__ for lv in self.levels],
+                         "sighier": self.sighier, "avail": self.avail,
+                         "states": self.states, "mag": self.mag,
+                         "magn": self.magn, "gpos": dict(self.gpos),
+                         "gn": dict(self.gn), "t": self.t,
+                         "last": self.last}, f)
+
+    def load(self, path):
+        with open(path, "rb") as f:
+            d = pickle.load(f)
+        while len(self.levels) < len(d["levels"]):
+            self.levels.append(_Lvl())
+        for lv, ld in zip(self.levels, d["levels"]):
+            lv.__dict__.update(ld)
+        self.sighier.update(d["sighier"]); self.avail.update(d["avail"])
+        self.states |= d["states"]; self.mag = d["mag"]; self.magn = d["magn"]
+        self.gpos.update(d["gpos"]); self.gn.update(d["gn"])
+        self.t = d["t"]; self.last.update(d["last"])
+
+
+class BayesHabituator:
+    """Clock masking by Bayes factor, no thresholds: for each element compare
+    the marginal likelihood of its change-causes under DEPENDENT (own
+    Dirichlet-multinomial) vs INDEPENDENT (global cause distribution) models;
+    mask at Jeffreys' decisive evidence for independence (log10 BF < -2)."""
+    def __init__(self):
+        self.cnt = {}                        # element -> Counter(cause)
+        self.glob = Counter()                # global cause usage
+        self.mask = set()
+        self.version = 0
+        self.frozen = False
+
+    def observe(self, changed, cause):
+        self.glob[cause] += 1
+        if self.frozen:
+            return
+        gtot = sum(self.glob.values())
+        for k, _m in changed:
+            if k in self.mask:
+                continue
+            c = self.cnt.setdefault(k, Counter())
+            c[cause] += 1
+            n = sum(c.values())
+            if n < 2:
+                continue
+            # log marginal likelihood, dependent: Dirichlet-multinomial(alpha=1)
+            K = max(len(self.glob), 2)
+            dep = (math.lgamma(K) - math.lgamma(n + K)
+                   + sum(math.lgamma(ci + 1) for ci in c.values()))
+            # independent: causes drawn from the global empirical distribution
+            ind = sum(ci * math.log(self.glob[cc] / gtot) for cc, ci in c.items())
+            if (dep - ind) / math.log(10) < -2:          # decisive for H0
+                self.mask.add(k)
+                self.version += 1
+
+    def state(self):
+        return {"cnt": {k: dict(v) for k, v in self.cnt.items()},
+                "glob": dict(self.glob), "mask": tuple(self.mask),
+                "version": self.version}
+
+    def restore(self, d):
+        self.cnt = {k: Counter(v) for k, v in d["cnt"].items()}
+        self.glob = Counter(d["glob"]); self.mask = set(d["mask"])
+        self.version = d["version"]; self.frozen = True
+
+
+# ================================ gates =====================================
+def gates():
+    from predictive_agent import GridWorld, SkinnedGridWorld, ClockedGridWorld
+    print("BAYES AGENT (PSRL, heuristic-free) on the standard gates:")
+
+    env = GridWorld(n=6)
+    ag = BayesAgent(actions=[0, 1, 2, 3])
+    sig = env.reset(); tot = 0.0; hist = []
+    for step in range(1, 3001):
+        a, _, _ = ag.act(sig, env.actions)
+        ns, r, _ = env.step(a)
+        ag.learn(sig, a, r, ns, env.actions)
+        sig = ns; tot += r
+        if step % 500 == 0:
+            hist.append(tot); tot = 0.0
+    print(f"  GridWorld     reward/500: {[f'{h:.0f}' for h in hist]} "
+          f"(old agent: 23,41,47,47,50,50)")
+
+    for stacked in (False, True):
+        env = SkinnedGridWorld()
+        ag = BayesAgent(actions=env.actions)
+        wrap = (lambda o: SigStack((o, o[:2]))) if stacked else (lambda o: o)
+        sig = wrap(env.obs()); tot = 0.0; hist = []
+        for step in range(1, 5001):
+            a, _, _ = ag.act(sig, env.actions)
+            nobs, r = env.step(a)
+            ag.learn(sig, a, r, wrap(nobs), env.actions)
+            sig = wrap(nobs); tot += r
+            if step % 1000 == 0:
+                hist.append(tot); tot = 0.0
+        print(f"  Skinned {'multi' if stacked else 'exact'}  reward/1000: "
+              f"{[f'{h:.0f}' for h in hist]}")
+
+    for habit in (False, True):
+        env = ClockedGridWorld()
+        ag = BayesAgent(actions=env.actions)
+        hab = BayesHabituator()
+        prev = env.obs()
+        enc = lambda o: tuple("·" if i in hab.mask else v for i, v in enumerate(o))
+        sig = enc(prev); tot = 0.0; hist = []
+        for step in range(1, 5001):
+            a, _, _ = ag.act(sig, env.actions)
+            nobs, r = env.step(a)
+            if habit:
+                hab.observe({(i, (prev[i], nobs[i]))
+                             for i in range(3) if nobs[i] != prev[i]}, a)
+            ag.learn(sig, a, r, enc(nobs), env.actions)
+            sig, prev = enc(nobs), nobs; tot += r
+            if step % 1000 == 0:
+                hist.append(tot); tot = 0.0
+        print(f"  Clocked {'hab  ' if habit else 'exact'}  reward/1000: "
+              f"{[f'{h:.0f}' for h in hist]} (masked: {sorted(hab.mask)})")
+
+
+if __name__ == "__main__":
+    gates()
