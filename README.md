@@ -144,6 +144,26 @@ The full lab notebook of every experiment, dead end, and pathology lives in
 the code comments and docstrings — they're written as findings, not
 decorations.
 
+## What's in the box
+
+```
+predictive_agent.py   the generic agent: counts, multi-resolution backoff,
+                      sleep/lifelong memory, clock habituation + its proof gates
+micro_cortex.py       the generalizing micro-feature learner (SARSA(λ), local)
+clark_arc_agent.py    the ARC adapter: object segmentation, retina, rewards
+bayes_agent.py        the heuristic-free rewrite (hierarchical PSRL) + gates
+arc_bayes.py          ARC adapter for the Bayes agent
+one_mind.py           ONE model that draws, names, perceives, acts, dreams
+mind.py               the front door: route any prompt to the right faculty
+psc_studio.py/_omni   the generation substrate (images, music, multimodal)
+psc_image_gen/_music  codecs the studio builds on
+arc_record.py         film any game with any brain -> GIF
+arc_report.py         official-style RHAE scoring for benchmark logs
+outputs/run_benchmark.sh   25 games x 2 passes, tagged brains
+outputs/run_forever.sh     the lifelong loop (stop: touch outputs/STOP)
+docs/                 design notes + the legacy no-backprop prototypes
+```
+
 ## Run it
 
 ```bash
