@@ -144,6 +144,36 @@ The full lab notebook of every experiment, dead end, and pathology lives in
 the code comments and docstrings — they're written as findings, not
 decorations.
 
+## Brain primitives: fetch, search, settle (all backprop-free)
+
+A counting machine can't reach back, search, or satisfy constraints. A brain
+does all three without gradients, so we added the math:
+
+- **Non-local fetch** (`assoc_memory.py`) — a Hebbian content-addressable
+  memory. Modern Hopfield networks *are* attention (`softmax(βKq)·V`), but the
+  memory is stored by *writing*, not backprop. This is attention without
+  gradients. Proof: DNA→RNA transcription and reverse-complement in their
+  natural separated form went from **0% → 100%** — the model fetches the
+  aligned base instead of needing it adjacent.
+- **Global search** (`search.py`) — verifier-guided best-first search:
+  propose, score with the checker, expand, backtrack. The verifiable reward is
+  the value signal. Solves the protein-folding task below.
+- **Constraint satisfaction** (`search.py:relax`) — iterative local
+  consistency to a fixed point (AC-3 flavour), gradient-free.
+
+## Science it can actually do (`science.py`, all verifiable)
+
+```
+BIOLOGY    transcription / reverse-complement / codon->protein   100%
+CHEMISTRY  molar mass (H2O=18, glucose=180, ...)                 exact
+FOLDING    2D HP-lattice protein folding via search    optimal for short
+           chains (verified vs brute force), degrades with length
+```
+
+Honest line: it does the *lookups and local procedures* of science (genetic
+code, complements, mass accumulation) and *searches* the hard combinatorial
+ones (folding) — it does not reason them out. That's the brain we built.
+
 ## What's in the box
 
 ```

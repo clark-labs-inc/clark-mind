@@ -22,11 +22,16 @@ while [[ ! -e outputs/STOP ]]; do
       || echo "##### GAME $g FAILED #####" >> $log
   done
   # PRACTICE: train and exercise the other faculties every cycle --
-  # the one-mind battery (draw/name/perceive/act/dream, metrics logged),
-  # plus music and image generation through the studio
+  # the one-mind battery (draw/name/perceive/act/dream), generation, the
+  # verifiable curricula (arithmetic with the locality/INFILL trick), and the
+  # full SCIENCE set (biology via content-addressable fetch, chemistry,
+  # protein folding via search). Metrics logged per cycle.
   if [[ ! -e outputs/STOP ]]; then
     echo "##### PASS $n PRACTICE #####" >> $log
     python3 one_mind.py >> $log 2>&1 || echo "PRACTICE one_mind FAILED" >> $log
+    python3 science.py >> $log 2>&1 || echo "PRACTICE science FAILED" >> $log
+    python3 lessons_think.py >> $log 2>&1 || echo "PRACTICE think FAILED" >> $log
+    python3 lessons_skills.py >> $log 2>&1 || echo "PRACTICE skills FAILED" >> $log
     python3 psc_studio.py "generate piano music" >> $log 2>&1 \
       || echo "PRACTICE music FAILED" >> $log
     python3 psc_studio.py "make an image of a $((n % 10))" >> $log 2>&1 \

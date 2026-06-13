@@ -102,6 +102,12 @@ def dispatch(prompt):
         return lifelong(False)
     if any(k in p for k in ("resume", "start", "run")) and ("learn" in p or "forever" in p):
         return lifelong(True)
+    if any(k in p for k in ("science", "biology", "dna", "rna", "protein",
+                            "chemistry", "molecule", "fold")):
+        return sh([GEN_PY, "science.py"])          # verifiable science curriculum
+    if any(k in p for k in ("math", "arithmetic", "add", "multiply", "think",
+                            "calculus", "deriv")):
+        return sh([GEN_PY, "lessons_think.py"])    # thinking / verifiable math
     if any(k in p for k in ("play", "arc", " game", "level")) or \
             any(t in GAMES for t in re.findall(r"[a-z][a-z0-9]{3}", p)):
         return act(prompt)
