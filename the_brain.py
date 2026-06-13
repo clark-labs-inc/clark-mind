@@ -41,6 +41,8 @@ class TheBrain:
         self.cod = None                                  # vision codec (lazy)
         self.taught = set()
         self.read_pos = 0                                # chars of text ingested
+        self.sem = None                                  # semantic embeddings (SVD of PPMI)
+        self.sem_vocab = []; self.sem_idx = {}
 
     # ---------- learning into the ONE model ----------
     def _teach(self, seqs):
@@ -148,10 +150,12 @@ class TheBrain:
     # ---------- persistence: ONE file ----------
     def save(self):
         os.makedirs("outputs", exist_ok=True)
-        with open(PATH, "wb") as f:
+        with open(PATH + ".tmp", "wb") as f:                 # atomic: temp + rename
             pickle.dump({"t": self.psc.t, "taught": self.taught,
                          "K": self.mem.K, "V": self.mem.V, "cod": self.cod,
-                         "read_pos": self.read_pos}, f)
+                         "read_pos": self.read_pos, "sem": self.sem,
+                         "sem_vocab": self.sem_vocab, "sem_idx": self.sem_idx}, f)
+        os.replace(PATH + ".tmp", PATH)                      # never a truncated read
 
     def load(self):
         if not os.path.exists(PATH):
@@ -160,7 +164,38 @@ class TheBrain:
         self.psc.t = d["t"]; self.taught = d["taught"]
         self.mem.K = d["K"]; self.mem.V = d["V"]; self.cod = d["cod"]
         self.read_pos = d.get("read_pos", 0)
+        self.sem = d.get("sem"); self.sem_vocab = d.get("sem_vocab", [])
+        self.sem_idx = d.get("sem_idx", {})
         return True
+
+    # ---------- semantics: meaning = spectral factorization of the counts ----------
+    def build_semantics(self, V=4000):
+        """Turn local co-occurrence into a SEMANTIC space (SVD of PPMI). This is
+        the operation that crosses 'statistics -> meaning' -- gradient-free."""
+        from semantics import load_words, cooccur, ppmi, rsvd
+        words = load_words()
+        C, vocab, idx = cooccur(words, V=V)
+        U, S = rsvd(ppmi(C), k=200)
+        self.sem = (U * np.sqrt(S)).astype(np.float32)
+        self.sem_vocab, self.sem_idx = vocab, idx
+        return len(vocab)
+
+    def similar(self, word, n=6):
+        if self.sem is None or word not in self.sem_idx:
+            return []
+        v = self.sem[self.sem_idx[word]]
+        s = self.sem @ v / (np.linalg.norm(self.sem, axis=1)*np.linalg.norm(v)+1e-9)
+        return [self.sem_vocab[i] for i in np.argsort(-s)
+                if self.sem_vocab[i] != word][:n]
+
+    def analogy(self, a, b, c, n=3):
+        if self.sem is None or not all(w in self.sem_idx for w in (a, b, c)):
+            return []
+        v = self.sem[self.sem_idx[b]] - self.sem[self.sem_idx[a]] + self.sem[self.sem_idx[c]]
+        s = self.sem @ v / (np.linalg.norm(self.sem, axis=1)*np.linalg.norm(v)+1e-9)
+        seen = {a, b, c}
+        return [self.sem_vocab[i] for i in np.argsort(-s)
+                if self.sem_vocab[i] not in seen][:n]
 
     # ---------- lifelong: the one brain keeps READING (genuine growth) ----------
     def ingest_text(self, chunk):
@@ -186,6 +221,9 @@ class TheBrain:
     def lifelong(self, chunk=40000, test_n=15000):
         if not self.load():
             print("growing the one brain ..."); self.grow(vision=True); self.save()
+        if self.sem is None:
+            print("building semantic space (SVD of co-occurrence) ...")
+            self.build_semantics(); self.save()
         corpus = open("data/wiki_train.txt", errors="replace").read()
         test = corpus[-test_n:-test_n + 4000]
         train_end = max(1, len(corpus) - test_n)
@@ -229,6 +267,14 @@ class TheBrain:
         if m: return self.revcomp(m[1].upper())
         m = re.search(r"transcribe ([acgt]+)", low)
         if m: return self.transcribe(m[1].upper())
+        m = re.search(r"(\w+) is to (\w+) as (\w+) is to", low)
+        if m:
+            if self.sem is None: self.build_semantics()
+            return ", ".join(self.analogy(m[1], m[2], m[3])) or "(unknown)"
+        m = re.search(r"(?:similar to|like|meaning of|related to) (\w+)", low)
+        if m:
+            if self.sem is None: self.build_semantics()
+            return ", ".join(self.similar(m[1])) or "(unknown word)"
         return "I can: add/multiply, transcribe/complement/translate DNA, name a digit, draw a digit, remember/recall."
 
 
