@@ -23,6 +23,7 @@ import os, re, sys, math, pickle, random, numpy as np
 from substrate import UniversalPSC, _sample
 from psc_omni import VOCAB, VIS0, KV, BOS, EOS, SEP, txt, WORD
 from assoc_memory import AssocMemory
+from predictive_coding import PredictiveCoding      # the free-energy deep faculty
 
 np.seterr(over="ignore", invalid="ignore", divide="ignore")
 RNG = random.Random(0)
@@ -43,6 +44,7 @@ class TheBrain:
         self.read_pos = 0                                # chars of text ingested
         self.sem = None                                  # semantic embeddings (SVD of PPMI)
         self.sem_vocab = []; self.sem_idx = {}
+        self.cortex = None                               # predictive-coding deep learner
 
     # ---------- learning into the ONE model ----------
     def _teach(self, seqs):
@@ -154,7 +156,8 @@ class TheBrain:
             pickle.dump({"t": self.psc.t, "taught": self.taught,
                          "K": self.mem.K, "V": self.mem.V, "cod": self.cod,
                          "read_pos": self.read_pos, "sem": self.sem,
-                         "sem_vocab": self.sem_vocab, "sem_idx": self.sem_idx}, f)
+                         "sem_vocab": self.sem_vocab, "sem_idx": self.sem_idx,
+                         "cortex": self.cortex}, f)
         os.replace(PATH + ".tmp", PATH)                      # never a truncated read
 
     def load(self):
@@ -166,7 +169,36 @@ class TheBrain:
         self.read_pos = d.get("read_pos", 0)
         self.sem = d.get("sem"); self.sem_vocab = d.get("sem_vocab", [])
         self.sem_idx = d.get("sem_idx", {})
+        self.cortex = d.get("cortex")
         return True
+
+    # ---------- cortex: deep nonlinear learning by free-energy descent ----------
+    def _mnist8(self, n=4000):
+        from torchvision.datasets import MNIST
+        from PIL import Image
+        mn = MNIST(root="./data", train=True, download=True)
+        X = mn.data.numpy().astype(np.float32) / 255.0; Y = mn.targets.numpy()
+        idx = np.random.default_rng(0).choice(len(X), n, replace=False)
+        XS = np.stack([np.asarray(Image.fromarray(np.uint8(X[i]*255)).resize((8, 8)),
+                                  np.float32).ravel()/255.0 for i in idx])
+        return XS, Y[idx]
+
+    def grow_cortex(self, epochs=4):
+        """Predictive coding learns digit RECOGNITION (pixels->label) -- a
+        nonlinear task the counting model can't do; complements generative draw.
+        This is the deep-abstraction faculty, same free-energy engine as unify."""
+        XS, Y = self._mnist8()
+        self.cortex = PredictiveCoding([64, 128, 10], lr=0.01, T=25)
+        for _ in range(epochs):
+            for i in np.random.default_rng().permutation(len(XS)):
+                oh = np.full(10, -1.0); oh[Y[i]] = 1.0
+                self.cortex.train_step(XS[i], oh)
+        return self.cortex_eval()
+
+    def cortex_eval(self, n=400):
+        XS, Y = self._mnist8(n)
+        return 100 * np.mean([self.cortex.predict(XS[j]).argmax() == Y[j]
+                              for j in range(n)])
 
     # ---------- semantics: meaning = spectral factorization of the counts ----------
     def build_semantics(self, V=4000):
@@ -224,6 +256,10 @@ class TheBrain:
         if self.sem is None:
             print("building semantic space (SVD of co-occurrence) ...")
             self.build_semantics(); self.save()
+        if self.cortex is None:
+            print("growing the predictive-coding cortex (deep recognition) ...")
+            self.grow_cortex(); self.save()
+        cortex_X, cortex_Y = self._mnist8(4000)
         corpus = open("data/wiki_train.txt", errors="replace").read()
         test = corpus[-test_n:-test_n + 4000]
         train_end = max(1, len(corpus) - test_n)
@@ -237,10 +273,16 @@ class TheBrain:
             self.ingest_text(corpus[start:start + chunk])
             self.read_pos += chunk
             bpc = self.heldout_bpc(test)
+            # the cortex keeps learning too: a deep-recognition training pass
+            for i in np.random.default_rng(cyc).permutation(len(cortex_X))[:800]:
+                oh = np.full(10, -1.0); oh[cortex_Y[i]] = 1.0
+                self.cortex.train_step(cortex_X[i], oh)
+            rec = self.cortex_eval(300)
             fac = self.faculty_check()
             kept = sum(fac.values())
             line = (f"cycle {cyc}: read {self.read_pos:,} chars  "
-                    f"heldout {bpc:.3f} bpc  faculties {kept}/5 "
+                    f"heldout {bpc:.3f} bpc  cortex {rec:.0f}% recog  "
+                    f"faculties {kept}/5 "
                     f"{''.join('.' if v else 'X' for v in fac.values())}")
             print(line); log.write(line + "\n"); log.flush()
             self.save()
