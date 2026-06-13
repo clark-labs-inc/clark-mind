@@ -109,23 +109,28 @@ def main():
     psc = UniversalPSC(VOCAB, [(-1,), (-2,), (-3,), (-4,), (-5,), (-6,)], ())
 
     # hold out the LAST problems of each task as an unseen test set
+    # Collect UNIQUE problems per task, but bound the attempts: some tasks
+    # have a small finite problem space (e.g. d/dx of c*x^p), so we take
+    # whatever uniques exist instead of spinning forever. Hold out ~20% (<=200)
+    # of each task's unique set as the unseen test; never let test eat the
+    # whole space (then "held-out" would be meaningless).
     train, tests = [], {t.name: [] for t in TASKS}
     for t in TASKS:
-        seen = set()
-        made = 0
-        while made < n_each + 200:
+        pool, seen, miss = [], set(), 0
+        while len(pool) < n_each + 200 and miss < 4000:
             p, a = t.sample()
             if p in seen:
-                continue
-            seen.add(p)
-            (tests[t.name].append((p, a)) if len(tests[t.name]) < 200
-             else train.append((t, p, a)))
-            made += 1
+                miss += 1; continue
+            seen.add(p); pool.append((p, a)); miss = 0
+        RNG_local = __import__("random").Random(7)
+        RNG_local.shuffle(pool)
+        n_test = min(200, max(1, len(pool) // 5))
+        tests[t.name] = pool[:n_test]
+        train += [(t, p, a) for p, a in pool[n_test:]]
 
     psc.fit([((len(s),), {(i,): v for i, v in enumerate(s)}, ())
              for _, p, a in train for s in [encode(p, a)]])
-    print(f"taught {len(train)} problems across {len(TASKS)} subjects "
-          f"(held-out 200 unseen each)\n")
+    print(f"taught {len(train)} problems across {len(TASKS)} subjects\n")
 
     def answer(prompt):
         seq = [BOS] + [ord(c) for c in prompt] + [SEP]
@@ -138,7 +143,7 @@ def main():
             E[(i,)] = v; out.append(chr(v))
         return "".join(out)
 
-    print(f"{'subject':16s} {'held-out accuracy':>18s}   example")
+    print(f"{'subject':16s} {'held-out':>10s} {'(n)':>6s}   example")
     print("-" * 62)
     for t in TASKS:
         ok = 0; ex = ""
@@ -152,7 +157,7 @@ def main():
                 tr = truth[::-1] if t.name != "d/dx poly" else truth
                 ex = f"{p}{sh}  ({'ok' if good else 'want '+tr})"
         acc = 100 * ok / len(tests[t.name])
-        print(f"{t.name:16s} {acc:16.0f}%   {ex}")
+        print(f"{t.name:16s} {acc:9.0f}% {len(tests[t.name]):>6d}   {ex}")
     print("\n(answers generated least-significant-digit-first; verifiable "
           "reward = the checker, no backprop)")
 
