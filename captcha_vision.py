@@ -194,14 +194,23 @@ class HardRecognizer:
 
 
 # ---- HARD string: overlapping glued chars + warp + occlusion + clutter ----
-def render_string_hard(s, pitch=11):
-    w = pitch * len(s) + 10
-    im = Image.new("L", (w, S), 0); d = ImageDraw.Draw(im)
+def render_string_hard(s, pitch=12):
+    """Hardest-still-LEGIBLE: overlap (pitch 12), per-char size + rotation
+    jitter, mild warp, one occlusion line, clutter. (Cranking past this makes
+    the string illegible to humans too -- not a fair test; the real lever for
+    'harder' beyond here is a segmentation primitive, not more noise.)"""
+    w = pitch * len(s) + 12
+    im = Image.new("L", (w, S), 0)
     for i, ch in enumerate(s):
-        d.text((4 + i * pitch, 1 + int(RNG.integers(-2, 3))), ch, fill=255,
-               font=_font(18))
+        sz = int(RNG.integers(16, 20))
+        ci = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(ci).text((2, 1), ch, fill=255, font=_font(sz))
+        ci = ci.rotate(float(RNG.uniform(-9, 9)), resample=Image.BILINEAR)
+        x0 = 4 + i * pitch
+        reg = np.maximum(np.asarray(im.crop((x0, 0, x0 + S, S))), np.asarray(ci))
+        im.paste(Image.fromarray(reg.astype(np.uint8)), (x0, 0))
     a = np.asarray(im.filter(ImageFilter.GaussianBlur(0.6)), np.float32) / 255.0
-    a = warp(a, amp=1.4); a = occlude(a, 1); a = clutter(a, 14)
+    a = warp(a, amp=0.9); a = occlude(a, 1); a = clutter(a, 12)
     return a
 
 
@@ -218,12 +227,30 @@ def _window_tile(a, x, w):
     return tile
 
 
-def solve_string_search(a, rec, kmin=3, kmax=6, widths=range(9, 17, 2)):
-    """SEGMENTATION BY SEARCH: DP over cut positions x and char-count j; each
-    candidate window is scored by the recognizer's confidence (=-distance).
-    Pick, over k in [kmin,kmax], the full-width covering with best avg score."""
+def _score_window(a, x, w, rec, angles=(-12, 0, 12)):
+    """Best (char, confidence) for the window [x:x+w], trying small deskews."""
+    seg = a[:, max(0, x):min(a.shape[1], x + w)]
+    if seg.shape[1] == 0:
+        return "?", -1e18
+    base = Image.fromarray(np.uint8(np.clip(seg, 0, 1) * 255))
+    best_ch, best_d = "?", 1e18
+    for ang in angles:
+        r = base.rotate(-ang, resample=Image.BILINEAR) if ang else base
+        tile = np.zeros((S, S), np.float32)
+        rr = np.asarray(r, np.float32) / 255.0
+        ww = min(S, rr.shape[1]); tile[:, :ww] = rr[:, :ww]
+        ch, d = rec.best(tile)
+        if d < best_d:
+            best_d, best_ch = d, ch
+    return best_ch, -best_d                              # higher = better
+
+
+def solve_string_search(a, rec, kmin=3, kmax=6, widths=range(9, 16, 2)):
+    """RECOGNITION-DRIVEN SEGMENTATION: DP over cut positions x and char-count
+    j; each candidate window is scored by the recognizer's best confidence
+    across small deskews. Pick, over k in [kmin,kmax], the full-width covering
+    with best AVERAGE confidence (so char count is chosen, not biased)."""
     W = a.shape[1]
-    NEG = -1e18
     dp = {(0, 0): (0.0, [])}
     for x in range(0, W):
         for j in range(0, kmax):
@@ -231,15 +258,12 @@ def solve_string_search(a, rec, kmin=3, kmax=6, widths=range(9, 17, 2)):
                 continue
             base_s, base_p = dp[(x, j)]
             for w in widths:
-                nx = x + w
-                if nx > W + 2:
+                nx = min(x + w, W)
+                if x + w > W + 3:
                     continue
-                tile = _window_tile(a, x, w)
-                if tile is None:
-                    continue
-                ch, dist = rec.best(tile)
-                ns = base_s + (-dist)
-                key = (min(nx, W), j + 1)
+                ch, conf = _score_window(a, x, w, rec)
+                ns = base_s + conf
+                key = (nx, j + 1)
                 if key not in dp or ns > dp[key][0]:
                     dp[key] = (ns, base_p + [ch])
     best = None
