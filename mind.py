@@ -119,6 +119,8 @@ def dispatch(prompt):
     if any(k in p for k in ("blurry", "rotated", "ocr", "text captcha",
                             "read text", "distorted")):
         return sh([GEN_PY, "captcha_vision.py"])
+    if any(k in p for k in ("dream", "mandala", "art", "imagine", "create")):
+        return sh([GEN_PY, "dream.py"])
     if any(k in p for k in ("primitive", "compose", "compound", "library")):
         return sh([GEN_PY, "primitives.py"])
     if any(k in p for k in ("brain", "transfer", "single brain")):
