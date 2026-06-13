@@ -108,6 +108,12 @@ def dispatch(prompt):
     if any(k in p for k in ("math", "arithmetic", "add", "multiply", "think",
                             "calculus", "deriv")):
         return sh([GEN_PY, "lessons_think.py"])    # thinking / verifiable math
+    if any(k in p for k in ("symmetry", "group", "abstract", "invariant")):
+        return sh([GEN_PY, "symmetry.py"])
+    if any(k in p for k in ("spectral", "subgoal", "bottleneck", "fiedler")):
+        return sh([GEN_PY, "spectral.py"])
+    if any(k in p for k in ("hyperbolic", "hierarchy", "taxonomy", "geometry")):
+        return sh([GEN_PY, "geometry.py"])
     if any(k in p for k in ("play", "arc", " game", "level")) or \
             any(t in GAMES for t in re.findall(r"[a-z][a-z0-9]{3}", p)):
         return act(prompt)
