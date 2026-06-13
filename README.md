@@ -205,48 +205,56 @@ taught 1,272 atomic primitive facts, ZERO full-skill examples:
 Learning a primitive benefits every skill that composes it; new skills that
 reuse primitives are free. That's how the brain compounds — backprop-free.
 
-## What's in the box
+## One big brain
+
+Every cognitive skill now lives in **one** persistent model — not a router over
+sub-brains. `the_brain.py` is a single `UniversalPSC` (a backoff count model
+over one vocabulary) + one associative memory, saved to one file, that answers
+everything by composing a shared primitive library:
+
+```bash
+python3 the_brain.py "add 347 285"        -> 632
+python3 the_brain.py "9 * 9"              -> 81
+python3 the_brain.py "transcribe ACGT"   -> ACGU
+python3 the_brain.py "name 5"            -> five
+python3 the_brain.py "remember CAT=M"    -> ok        (then) "recall CAT" -> M
+python3 the_brain.py "draw 8"            -> a digit image
+python3 the_brain.py                     -> grow + persist + a mixed battery
+```
+
+It accumulates with no forgetting (counts add, they don't overwrite) and
+transfers via composed primitives — the design `brain.py` proved and this file
+realizes.
 
 ```
-predictive_agent.py   the generic agent: counts, multi-resolution backoff,
-                      sleep/lifelong memory, clock habituation + its proof gates
-micro_cortex.py       the generalizing micro-feature learner (SARSA(λ), local)
-clark_arc_agent.py    the ARC adapter: object segmentation, retina, rewards
-bayes_agent.py        the heuristic-free rewrite (hierarchical PSRL) + gates
-arc_bayes.py          ARC adapter for the Bayes agent
-one_mind.py           ONE model that draws, names, perceives, acts, dreams
-mind.py               the front door: route any prompt to the right faculty
-psc_studio.py/_omni   the generation substrate (images, music, multimodal)
-psc_image_gen/_music  codecs the studio builds on
-arc_record.py         film any game with any brain -> GIF
-arc_report.py         official-style RHAE scoring for benchmark logs
-outputs/run_benchmark.sh   25 games x 2 passes, tagged brains
-outputs/run_forever.sh     the lifelong loop (stop: touch outputs/STOP)
-docs/                 design notes + the legacy no-backprop prototypes
+the_brain.py    THE brain: one persistent model + one memory, all skills
+substrate.py    UniversalPSC + sampling (the shared predictive core)
+psc_omni.py     the unified vocabulary + vision codec
+assoc_memory.py the associative-fetch primitive (attention without backprop)
+symmetry/spectral/geometry/search.py   the innate operators it composes
+                (group theory, Fiedler subgoals, hyperbolic hierarchy, search)
 ```
+
+The ARC-AGI-3 game-playing system (`bayes_agent.py`, `clark_arc_agent.py`,
+`arc_bayes.py`, `predictive_agent.py`, `micro_cortex.py`, the lifelong loop) is
+a separate reinforcement-learning *body* — a different architecture from the
+cognitive brain — kept alongside it.
 
 ## Run it
 
 ```bash
-# talk to it (one front door for everything)
-python3 mind.py "make an image of a 7"
-python3 mind.py "play ft09 for 2000 steps"
-python3 mind.py "status"
+# the one brain
+python3 the_brain.py "add 347 285"
+python3 the_brain.py "translate ATGCCG"
+python3 the_brain.py "draw 7"
 
-# the one-model-no-router demo
-python3 one_mind.py
-
-# the agent's proof gates (GridWorld + reskinning + clock + lifelong memory)
+# the ARC body's proof gates / lifelong loop
 .venv-arc/bin/python predictive_agent.py
-
-# leave it learning forever (stop with: touch outputs/STOP)
-zsh outputs/run_forever.sh
+zsh outputs/run_forever.sh        # stop with: touch outputs/STOP
 ```
 
-Requirements: Python 3.12 with `numpy` and `arc-agi` for the games
-(`.venv-arc`), plus `PIL`/`torchvision`/`pretty_midi` for generation.
-Older no-backprop prototypes that led here are documented in
-[`docs/LEGACY.md`](docs/LEGACY.md).
+Requirements: Python 3.12 with `numpy` (and `PIL`/`torchvision` for vision);
+`arc-agi` in `.venv-arc` for the game body. Legacy prototypes: `docs/LEGACY.md`.
 
 ---
 

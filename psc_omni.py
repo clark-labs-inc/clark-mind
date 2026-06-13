@@ -22,7 +22,7 @@ from PIL import Image
 np.seterr(over="ignore", invalid="ignore", divide="ignore")
 os.makedirs("outputs/omni", exist_ok=True)
 RNG = np.random.default_rng(0)
-from psc_studio import UniversalPSC, _sample
+from substrate import UniversalPSC, _sample
 
 # ---- unified vocabulary layout ----
 KV, KA, GC = 256, 64, 32
