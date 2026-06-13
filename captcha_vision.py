@@ -56,6 +56,38 @@ def feat(a):
     return a.ravel()                                   # raw pixels (vision strength)
 
 
+# ---- HARD adversarial distortions (warp, occlusion, clutter) ----
+def warp(a, amp=2.0, period=10.0):
+    H, W = a.shape
+    ph = RNG.uniform(0, 6.28)
+    out = np.zeros_like(a)
+    for y in range(H):
+        sh = int(round(amp * np.sin(2 * np.pi * y / period + ph)))
+        out[y] = np.roll(a[y], sh)
+    ph2 = RNG.uniform(0, 6.28)
+    for x in range(W):
+        sh = int(round(amp * np.sin(2 * np.pi * x / period + ph2)))
+        out[:, x] = np.roll(out[:, x], sh)
+    return out
+
+
+def occlude(a, n=2):
+    im = Image.fromarray(np.uint8(a * 255)); d = ImageDraw.Draw(im)
+    H, W = a.shape
+    for _ in range(n):
+        d.line([(RNG.integers(0, W), RNG.integers(0, H)),
+                (RNG.integers(0, W), RNG.integers(0, H))],
+               fill=int(RNG.integers(120, 255)), width=1)
+    return np.asarray(im, np.float32) / 255.0
+
+
+def clutter(a, dots=18):
+    a = a.copy(); H, W = a.shape
+    for _ in range(dots):
+        a[RNG.integers(0, H), RNG.integers(0, W)] = RNG.uniform(0.4, 1.0)
+    return a
+
+
 # ---- no-backprop recognizer: class prototypes from distorted samples ----
 class CharRecognizer:
     def __init__(self, distort):
@@ -124,6 +156,101 @@ def solve_string(a, rec, k):
     return "".join(out)
 
 
+def render_char_hard(ch):
+    a = render(ch, rot=float(RNG.uniform(-25, 25)),
+               blur=float(RNG.uniform(0.3, 1.0)), jitter=1, sz=18)
+    a = warp(a, amp=1.6); a = occlude(a, 1); a = clutter(a, 10)
+    return a
+
+
+def hard_distort():
+    return None  # marker; CharRecognizer can't call render(**); handled below
+
+
+class HardRecognizer:
+    """Prototypes built from the HARD adversarial distortions; deskew at test."""
+    def __init__(self):
+        self.protos = {}
+        for ch in CHARS:
+            self.protos[ch] = np.mean([feat(render_char_hard(ch))
+                                       for _ in range(60)], 0)
+        self.M = np.stack([self.protos[c] for c in CHARS])
+
+    def best(self, tileSxS):
+        f = tileSxS.ravel(); d = ((self.M - f) ** 2).sum(1)
+        j = int(np.argmin(d))
+        return CHARS[j], float(d[j])
+
+    def deskew(self, a, angles=range(-30, 31, 6)):
+        base = Image.fromarray(np.uint8(np.clip(a, 0, 1) * 255))
+        best, bd = "?", 1e18
+        for ang in angles:
+            r = np.asarray(base.rotate(-ang, resample=Image.BILINEAR),
+                           np.float32) / 255.0
+            ch, d = self.best(r)
+            if d < bd:
+                bd, best = d, ch
+        return best, bd
+
+
+# ---- HARD string: overlapping glued chars + warp + occlusion + clutter ----
+def render_string_hard(s, pitch=11):
+    w = pitch * len(s) + 10
+    im = Image.new("L", (w, S), 0); d = ImageDraw.Draw(im)
+    for i, ch in enumerate(s):
+        d.text((4 + i * pitch, 1 + int(RNG.integers(-2, 3))), ch, fill=255,
+               font=_font(18))
+    a = np.asarray(im.filter(ImageFilter.GaussianBlur(0.6)), np.float32) / 255.0
+    a = warp(a, amp=1.4); a = occlude(a, 1); a = clutter(a, 14)
+    return a
+
+
+def _window_tile(a, x, w):
+    """Pad the window into an S x S tile (char left-aligned, like training) --
+    do NOT resize: stretching a narrow window distorts the aspect away from the
+    upright single-char prototypes."""
+    seg = a[:, max(0, x):min(a.shape[1], x + w)]
+    if seg.shape[1] == 0:
+        return None
+    tile = np.zeros((S, S), np.float32)
+    ww = min(S, seg.shape[1])
+    tile[:, :ww] = seg[:, :ww]
+    return tile
+
+
+def solve_string_search(a, rec, kmin=3, kmax=6, widths=range(9, 17, 2)):
+    """SEGMENTATION BY SEARCH: DP over cut positions x and char-count j; each
+    candidate window is scored by the recognizer's confidence (=-distance).
+    Pick, over k in [kmin,kmax], the full-width covering with best avg score."""
+    W = a.shape[1]
+    NEG = -1e18
+    dp = {(0, 0): (0.0, [])}
+    for x in range(0, W):
+        for j in range(0, kmax):
+            if (x, j) not in dp:
+                continue
+            base_s, base_p = dp[(x, j)]
+            for w in widths:
+                nx = x + w
+                if nx > W + 2:
+                    continue
+                tile = _window_tile(a, x, w)
+                if tile is None:
+                    continue
+                ch, dist = rec.best(tile)
+                ns = base_s + (-dist)
+                key = (min(nx, W), j + 1)
+                if key not in dp or ns > dp[key][0]:
+                    dp[key] = (ns, base_p + [ch])
+    best = None
+    for k in range(kmin, kmax + 1):
+        if (W, k) in dp:
+            avg = dp[(W, k)][0] / k
+            if best is None or avg > best[0]:
+                best = (avg, "".join(dp[(W, k)][1]))
+    return best[1] if best else ""
+
+
 def main():
     print("VISUAL CAPTCHA -- distorted character recognition (no backprop, "
           "verifiable)\n")
@@ -160,9 +287,29 @@ def main():
         sok += (pred == s)
         cok += sum(a == b for a, b in zip(pred, s)); ct += k
     print(f"\n   CAPTCHA STRING (3-5 chars) {100*sok/150:4.0f}% exact   "
-          f"{100*cok/ct:4.0f}% per-char  (segment + recognize)")
+          f"{100*cok/ct:4.0f}% per-char  (fixed-pitch segment + recognize)")
+
+    # ===================== HARD MODE =====================
+    print("\n   --- HARD MODE: warp + occlusion lines + clutter + overlap ---")
+    hard = HardRecognizer()
+    h_ok = sum(hard.deskew(render_char_hard(
+        ch := CHARS[int(RNG.integers(len(CHARS)))]))[0] == ch for _ in range(300))
+    print(f"   HARD single char           {100*h_ok/300:4.0f}%   "
+          f"(warp+occlude+clutter+rot, deskew search)")
+    # hard overlapping string via segmentation-by-search
+    sok = cok = ct = 0
+    for _ in range(120):
+        k = int(RNG.integers(3, 6))
+        s = "".join(CHARS[int(RNG.integers(len(CHARS)))] for _ in range(k))
+        pred = solve_string_search(render_string_hard(s), hard)
+        sok += (pred == s)
+        cok += sum(a == b for a, b in zip(pred, s)); ct += k
+    print(f"   HARD overlapping string    {100*sok/120:4.0f}% exact   "
+          f"{100*cok/ct:4.0f}% per-char  (segmentation BY SEARCH)")
     print("\nperception is the strength: blur/noise barely dent it. rotation needs")
-    print("SEARCH not invariance (a rotated 6 is a 9). all synthetic + verifiable.")
+    print("SEARCH not invariance (a rotated 6 is a 9). hard mode shows the real")
+    print("wall -- glued/warped strings, where SEGMENTATION (not recognition) is")
+    print("the bottleneck, attacked by search. all synthetic + verifiable.")
 
 
 if __name__ == "__main__":
