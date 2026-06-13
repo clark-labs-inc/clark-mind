@@ -26,9 +26,14 @@ posterior over worlds -- and every behavior is derived from it:
                 reward is silent (their Q-gap below sampling noise).
 
   RESAMPLING    UCRL2's parameter-free episode rule: resample the world when
-                any (s,a) has been visited as often within the episode as in
-                all history before it (doubling), or when an unvisited pair
-                is first tried.
+                a KNOWN pair's within-episode visits double its history
+                (2*nu >= n, snapshot-free). Novel states do NOT trigger a
+                replan -- a never-seen state needs one posterior draw per
+                action against the current values, not a new world; that
+                single change is what makes PSRL fast enough to deploy.
+                A bounded-staleness heartbeat (256 steps) caps how old a
+                sampled world can get. The fine level is solved as flat
+                numpy arrays with warm-started value iteration.
 
   PERCEPTION    Habituator (clock masking) decided by BAYES FACTOR between
                 "changes depend on cause" and "changes independent of cause",
@@ -86,7 +91,11 @@ class BayesAgent:
         # episode state (PSRL)
         self.policy = {}                     # state -> action (greedy in sample)
         self.ep_nu = Counter()               # within-episode visit counts
-        self.ep_base = {}                    # counts at sampling time
+        self.plan_t = -(10 ** 9)             # step of the last world sample
+        self._parents = [{}]                 # per-level child -> parent links
+        self.Q1r, self.Q1i = {}, {}          # level-1 sampled Q (escape targets)
+        self.vu_r = self.vu_i = 0.0          # UNKNOWN closure values
+        self._V_store = {"r": {}, "i": {}}   # warm-start values across plans
         self.hab = hab                       # optional Habituator (adapter-fed)
 
     # ----------------------------------------------------------- learning
@@ -118,11 +127,17 @@ class BayesAgent:
             self.states.add(next_sig)
         self.t += 1
         self.last[(sig, a)] = self.t
-        # UCRL2 episode rule: doubling (or first visit) ends the episode
+        # UCRL2 episode rule, snapshot-free: with nu = visits since the last
+        # world sample, pre-sample history is n - nu and the episode ends
+        # when nu doubles it. A pair's FIRST visit never ends the episode
+        # (sweeps through novelty stay replan-free; act() handles new states
+        # with a one-step draw) -- but its SECOND within-episode visit can:
+        # revisiting under one frozen sample means the policy is looping.
         k = (sig, a)
         self.ep_nu[k] += 1
-        if self.ep_nu[k] >= max(1, self.ep_base.get(k, 0)):
-            self.policy = {}                 # forces a fresh world sample
+        nu, n = self.ep_nu[k], self.levels[0].n.get(k, 0)
+        if nu >= 2 and 2 * nu >= n:
+            self.policy = {}
         if self.max_pairs and len(self.levels[0].n) > self.max_pairs:
             self.sleep()
 
@@ -162,32 +177,39 @@ class BayesAgent:
             m = (p + ALPHA * m) / (n + ALPHA)
         return m
 
-    def _sample_world(self, fine_states):
-        """Hierarchical PSRL: sample and value-iterate one world PER LEVEL,
-        coarse first. Each level's Dirichlet escape mass resolves to the
-        COARSER level's sampled Q for the same action (knowledge transfers
-        down the hierarchy as the prior); the root escapes to the UNKNOWN
-        closure. Two value functions per level: score, and information."""
+    def _sample_world(self):
+        """Hierarchical PSRL, engineered for deployment: coarse levels are
+        tiny and solved in dicts; the FINE level is solved as flat numpy
+        arrays -- one vectorized Gamma call realizes the whole Dirichlet
+        world, and value iteration is warm-started from the previous plan's
+        values. Each level's escape mass resolves to the coarser level's
+        sampled Q (knowledge transfers down the hierarchy as the prior);
+        the root escapes to the UNKNOWN closure."""
         gamma = self.gamma
         L = len(self.levels)
-        # state sets, parent links and action sets per level
+        fine_states = [s for s in self.states if s in self.avail]
+        if not fine_states:
+            return
         lvl_states = [set() for _ in range(L)]
         parents = [{} for _ in range(L)]
         lvl_acts = [defaultdict(set) for _ in range(L)]
         for s in fine_states:
             h = self.sighier.get(s, (s,))
-            acts = self._acts(s)
+            acts = self.avail[s]
             for i, hi in enumerate(h):
-                lvl_states[i].add(hi)
-                lvl_acts[i][hi].update(acts)
+                if i:
+                    lvl_states[i].add(hi)
+                    lvl_acts[i][hi].update(acts)
                 if i + 1 < len(h):
                     parents[i][hi] = h[i + 1]
         self._parents = parents
         mag = (self.mag / self.magn) if self.magn else 0.0
-        r_u = float(self.rng.beta(ALPHA, ALPHA + self.t)) * mag
-        vu_r, vu_i = r_u / (1 - gamma), 1.0 / (1 - gamma)
-        Qr_up, Qi_up = {}, {}                # coarser level's sampled Q's
-        for i in range(L - 1, -1, -1):
+        self.vu_r = float(self.rng.beta(ALPHA, ALPHA + self.t)) * mag / (1 - gamma)
+        self.vu_i = 1.0 / (1 - gamma)
+        vu_r, vu_i = self.vu_r, self.vu_i
+        # ---- coarse levels: small, dict value iteration as before ----
+        Qr_up, Qi_up = {}, {}
+        for i in range(L - 1, 0, -1):
             lv = self.levels[i]
             states = lvl_states[i]
             Tr, Rw, Ig, Esc = {}, {}, {}, {}
@@ -196,7 +218,7 @@ class BayesAgent:
                 for a in lvl_acts[i][s]:
                     k = (s, a)
                     tc = lv.trans.get(k)
-                    outs, w = [None], [self.rng.gamma(ALPHA)]   # None = escape
+                    outs, w = [None], [self.rng.gamma(ALPHA)]
                     if tc:
                         for ns, c in tc.items():
                             if ns in states:
@@ -239,36 +261,124 @@ class BayesAgent:
                         wi * (ei if o is None else Vi.get(o, ei))
                         for o, wi in zip(outs, w))
             Qr_up, Qi_up = Qr, Qi
-            if i == 0:
-                # greedy policy: score decides when it speaks above its own
-                # sampling noise (a second independent draw); information
-                # decides when score is silent; residual ties break uniformly
-                pol = {}
-                for s in states:
-                    acts = list(lvl_acts[i][s])
-                    qr = {a: Qr[(s, a)] for a in acts}
-                    qi = {a: Qi[(s, a)] for a in acts}
-                    noise = max(abs(self._sample_p(0, s, a) * mag - Rw[(s, a)])
-                                for a in acts)
-                    top = max(qr.values())
-                    cand = [a for a in acts if top - qr[a] <= noise]
-                    ti = max(qi[a] for a in cand)
-                    cand = [a for a in cand if qi[a] >= ti - 1e-12]
-                    pol[s] = cand[int(self.rng.integers(len(cand)))]
-                self.policy = pol
+        self.Q1r, self.Q1i = Qr_up, Qi_up    # escape targets for the fine level
+        # ---- fine level: flat arrays ----
+        lv = self.levels[0]
+        sidx = {s: j for j, s in enumerate(fine_states)}
+        p_state, p_act = [], []
+        a1, b1, nv, e_r, e_i = [], [], [], [], []
+        out_off, out_idx, out_cnt = [0], [], []
+        state_pairs = [[] for _ in fine_states]
+        mc = {}
+        for s in fine_states:
+            h = self.sighier.get(s, (s,))
+            up = h[1] if len(h) > 1 else None
+            si = sidx[s]
+            for a in self.avail[s]:
+                k = (s, a)
+                n = lv.n.get(k, 0); pos = lv.pos.get(k, 0)
+                key = (up, a)
+                if key not in mc:
+                    mc[key] = (self._mean_chain(1, up, a)
+                               if up is not None and L > 1 else
+                               (self.gpos[a] + ALPHA) / (self.gn[a] + 2 * ALPHA))
+                m = mc[key]
+                state_pairs[si].append(len(p_state))
+                p_state.append(si); p_act.append(a)
+                a1.append(pos + ALPHA * m); b1.append((n - pos) + ALPHA * (1 - m))
+                nv.append(n)
+                e_r.append(Qr_up.get(key, vu_r) if up is not None else vu_r)
+                e_i.append(Qi_up.get(key, vu_i) if up is not None else vu_i)
+                tc = lv.trans.get(k)
+                if tc:
+                    for ns, c in tc.items():
+                        j = sidx.get(ns)
+                        if j is not None:
+                            out_idx.append(j); out_cnt.append(c)
+                out_off.append(len(out_idx))
+        ps = np.asarray(p_state)
+        a1 = np.maximum(np.asarray(a1), 1e-6); b1 = np.maximum(np.asarray(b1), 1e-6)
+        Rw = self.rng.beta(a1, b1) * mag
+        noise = np.abs(self.rng.beta(a1, b1) * mag - Rw)   # the posterior's own spread
+        Ig = 1.0 / (np.asarray(nv, dtype=np.float64) + 1.0)
+        e_r = np.asarray(e_r); e_i = np.asarray(e_i)
+        off = np.asarray(out_off)
+        out_idx = np.asarray(out_idx, dtype=np.int64)
+        w = self.rng.gamma(np.asarray(out_cnt, dtype=np.float64)) \
+            if out_cnt else np.zeros(0)
+        we = self.rng.gamma(ALPHA, size=len(ps))
+        cs = np.concatenate(([0.0], np.cumsum(w)))
+        norm = (cs[off[1:]] - cs[off[:-1]]) + we
+        Vfin = {}
+        for tag, R, ESC in (("r", Rw, e_r), ("i", Ig, e_i)):
+            store = self._V_store[tag]
+            V = np.asarray([store.get(s, 0.0) for s in fine_states])
+            for _ in range(60):
+                val = w * V[out_idx] if len(out_idx) else w
+                cv = np.concatenate(([0.0], np.cumsum(val)))
+                rowv = cv[off[1:]] - cv[off[:-1]]
+                q = R + gamma * (we * ESC + rowv) / norm
+                newV = np.zeros(len(fine_states))
+                np.maximum.at(newV, ps, q)
+                if np.max(np.abs(newV - V)) < 1e-3:
+                    V = newV; break
+                V = newV
+            self._V_store[tag] = {s: float(V[j]) for j, s in enumerate(fine_states)}
+            Vfin[tag] = (V, q)
+        qr, qi = Vfin["r"][1], Vfin["i"][1]
+        pol = {}
+        for s in fine_states:
+            ids = state_pairs[sidx[s]]
+            qrs = qr[ids]
+            top = qrs.max(); nz = noise[ids].max()
+            cand = [ids[j] for j in range(len(ids)) if top - qrs[j] <= nz]
+            ti = max(qi[c] for c in cand)
+            cand = [c for c in cand if qi[c] >= ti - 1e-12]
+            pol[s] = p_act[cand[int(self.rng.integers(len(cand)))]]
+        self.policy = pol
+        self.plan_t = self.t
         self.ep_nu = Counter()
-        self.ep_base = dict(self.levels[0].n)
+
+    def _one_step(self, sig, acts):
+        """A novel or off-policy state does not need a fresh WORLD: one
+        posterior draw per action against the current plan's values is the
+        same decision rule at depth one (escape resolves to the coarser
+        level's sampled Q, exactly as in the full plan)."""
+        h = self.sighier.get(sig, (sig,))
+        up = h[1] if len(h) > 1 else None
+        while len(self._parents) < max(1, len(h)):
+            self._parents.append({})
+        for i in range(len(h) - 1):
+            self._parents[i][h[i]] = h[i + 1]
+        mag = (self.mag / self.magn) if self.magn else 0.0
+        lv = self.levels[0]
+        qr, qi, noise = {}, {}, 0.0
+        for a in acts:
+            k = (h[0], a)
+            n = lv.n.get(k, 0); pos = lv.pos.get(k, 0)
+            m = (self._mean_chain(1, up, a)
+                 if up is not None and len(self.levels) > 1 else
+                 (self.gpos[a] + ALPHA) / (self.gn[a] + 2 * ALPHA))
+            aa = max(pos + ALPHA * m, 1e-6); bb = max((n - pos) + ALPHA * (1 - m), 1e-6)
+            d1 = float(self.rng.beta(aa, bb)); d2 = float(self.rng.beta(aa, bb))
+            qr[a] = d1 * mag + self.gamma * self.Q1r.get((up, a), self.vu_r)
+            qi[a] = 1.0 / (n + 1.0) + self.gamma * self.Q1i.get((up, a), self.vu_i)
+            noise = max(noise, abs(d2 - d1) * mag)
+        top = max(qr.values())
+        cand = [a for a in acts if top - qr[a] <= noise]
+        ti = max(qi[a] for a in cand)
+        cand = [a for a in cand if qi[a] >= ti - 1e-12]
+        return cand[int(self.rng.integers(len(cand)))]
 
     def act(self, sig, available, feats=None):
         sig = self._intern(sig)
         if available is not None:
             self.avail[sig] = tuple(available)
-        if sig not in self.policy:
-            self._sample_world(self.states | {sig})
+        if not self.policy or self.t - self.plan_t >= 256:
+            self._sample_world()             # bounded staleness (lazy PSRL)
         a = self.policy.get(sig)
         if a is None or (available is not None and a not in available):
-            pool = list(available or self.actions)
-            a = pool[int(self.rng.integers(len(pool)))]
+            a = self._one_step(sig, list(available or self.actions))
         return a, {}, []
 
     # --------------------------------------------------- bounded memory

@@ -50,7 +50,10 @@ def main():
     env = arc.make(gid); fr = env.reset()
     print(f"BayesAgent (PSRL, heuristic-free) on ARC-AGI-3: {gid}\n")
 
-    agent = BayesAgent(actions=A.action_space(), names=A.action_names())
+    # ~1GB brains: the episodic store holds ~2M pairs before sleep evicts;
+    # skills (scoring pairs) are protected for life regardless
+    agent = BayesAgent(actions=A.action_space(), names=A.action_names(),
+                       max_pairs=2_000_000)
     if args.brain and os.path.exists(args.brain):
         if os.path.exists(args.brain + ".retina"):
             with open(args.brain + ".retina", "rb") as f:
