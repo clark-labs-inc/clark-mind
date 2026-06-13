@@ -58,4 +58,33 @@ its actual strength — local, verifiable, procedural reasoning — it can be
 output, with no gradients anywhere. The skill is in the **representation**
 (arrange dependencies to be local); the learning rule stays pure counting.
 
-Run: `python3 lessons_think.py` and `python3 lessons.py`
+## More skills (`lessons_skills.py`)
+
+The locality principle generalizes beyond addition:
+
+```
+MULTIPLY  d x N (single digit x long number):  3-digit 100% · 20-digit 96% · 100-digit 82%
+d/dx c*x^p (calculus power rule):              DIRECT 99% · LOCAL 97%
+```
+
+- **Multiply** is the real win: trained on 1-3 digit numbers, it generalizes
+  to 100-digit multiplicands (graceful decay) via the same per-digit local
+  carry as addition.
+- **Derivative** is an honest caveat, not a triumph: both forms hit ~98%
+  because there are only 72 possible problems and the test reuses that space
+  -- this is *memorization of a finite rule-table*, not generalization. Small
+  finite skills the substrate simply memorizes; locality is what buys
+  generalization to unseen *sizes*.
+
+## The honest curriculum baseline (`lessons.py`)
+
+DIRECT (natural problem -> answer), held-out, no locality help:
+
+```
+addition 0% · subtraction 0% · modulo 44% · sequence-next 0% · d/dx 0% · units 0%
+```
+
+Everything that needs a carry or an input-copy fails; only modulo (tiny answer
+space) is partly learnable. This is the "before" that the locality trick fixes.
+
+Run: `python3 lessons_think.py`, `python3 lessons_skills.py`, `python3 lessons.py`
