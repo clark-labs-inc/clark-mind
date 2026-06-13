@@ -32,6 +32,11 @@ while [[ ! -e outputs/STOP ]]; do
     python3 science.py >> $log 2>&1 || echo "PRACTICE science FAILED" >> $log
     python3 lessons_think.py >> $log 2>&1 || echo "PRACTICE think FAILED" >> $log
     python3 lessons_skills.py >> $log 2>&1 || echo "PRACTICE skills FAILED" >> $log
+    # gradient-free "ancient math" primitives, exercised + regression-checked
+    python3 assoc_memory.py >> $log 2>&1 || echo "PRACTICE fetch FAILED" >> $log
+    python3 symmetry.py >> $log 2>&1 || echo "PRACTICE symmetry FAILED" >> $log
+    python3 spectral.py >> $log 2>&1 || echo "PRACTICE spectral FAILED" >> $log
+    python3 geometry.py >> $log 2>&1 || echo "PRACTICE geometry FAILED" >> $log
     python3 psc_studio.py "generate piano music" >> $log 2>&1 \
       || echo "PRACTICE music FAILED" >> $log
     python3 psc_studio.py "make an image of a $((n % 10))" >> $log 2>&1 \
