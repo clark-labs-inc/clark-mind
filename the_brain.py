@@ -19,7 +19,7 @@ Run:  python3 the_brain.py            -> grows, persists, runs a mixed battery
       python3 the_brain.py "add 347 285" | "translate ATGCCG" | "draw 7" | ...
 """
 from __future__ import annotations
-import os, re, sys, pickle, random, numpy as np
+import os, re, sys, math, pickle, random, numpy as np
 from substrate import UniversalPSC, _sample
 from psc_omni import VOCAB, VIS0, KV, BOS, EOS, SEP, txt, WORD
 from assoc_memory import AssocMemory
@@ -40,6 +40,7 @@ class TheBrain:
         self.mem = AssocMemory(beta=20.0)
         self.cod = None                                  # vision codec (lazy)
         self.taught = set()
+        self.read_pos = 0                                # chars of text ingested
 
     # ---------- learning into the ONE model ----------
     def _teach(self, seqs):
@@ -149,7 +150,8 @@ class TheBrain:
         os.makedirs("outputs", exist_ok=True)
         with open(PATH, "wb") as f:
             pickle.dump({"t": self.psc.t, "taught": self.taught,
-                         "K": self.mem.K, "V": self.mem.V, "cod": self.cod}, f)
+                         "K": self.mem.K, "V": self.mem.V, "cod": self.cod,
+                         "read_pos": self.read_pos}, f)
 
     def load(self):
         if not os.path.exists(PATH):
@@ -157,7 +159,53 @@ class TheBrain:
         d = pickle.load(open(PATH, "rb"))
         self.psc.t = d["t"]; self.taught = d["taught"]
         self.mem.K = d["K"]; self.mem.V = d["V"]; self.cod = d["cod"]
+        self.read_pos = d.get("read_pos", 0)
         return True
+
+    # ---------- lifelong: the one brain keeps READING (genuine growth) ----------
+    def ingest_text(self, chunk):
+        self._teach([[BOS] + [b for b in chunk.encode()] + [EOS]])
+
+    def heldout_bpc(self, text):
+        ts = [b for b in text.encode()]
+        E = {(i,): v for i, v in enumerate(ts)}
+        ll = 0.0
+        for i in range(1, len(ts)):
+            p = self.psc.predict(E, (), (i,))
+            ll += -math.log2(max(p[ts[i]], 1e-12))
+        return ll / max(1, len(ts) - 1)
+
+    def faculty_check(self):
+        a = self.add(347, 285) == 632
+        m = self.mul(7, 412) == 2884
+        t = self.transcribe("ACGT") == "ACGU"
+        n = self.name(5) == "five"
+        self.remember("CAT", "M"); r = self.recall("CAT") == "M"
+        return dict(add=a, mul=m, transcribe=t, name=n, recall=r)
+
+    def lifelong(self, chunk=40000, test_n=15000):
+        if not self.load():
+            print("growing the one brain ..."); self.grow(vision=True); self.save()
+        corpus = open("data/wiki_train.txt", errors="replace").read()
+        test = corpus[-test_n:-test_n + 4000]
+        train_end = max(1, len(corpus) - test_n)
+        log = open("outputs/brain_life.out", "a")
+        cyc = 0
+        print("lifelong single-brain learning (reads more each cycle); "
+              "stop: touch outputs/STOP")
+        while not os.path.exists("outputs/STOP"):
+            cyc += 1
+            start = self.read_pos % max(1, train_end - chunk)
+            self.ingest_text(corpus[start:start + chunk])
+            self.read_pos += chunk
+            bpc = self.heldout_bpc(test)
+            fac = self.faculty_check()
+            kept = sum(fac.values())
+            line = (f"cycle {cyc}: read {self.read_pos:,} chars  "
+                    f"heldout {bpc:.3f} bpc  faculties {kept}/5 "
+                    f"{''.join('.' if v else 'X' for v in fac.values())}")
+            print(line); log.write(line + "\n"); log.flush()
+            self.save()
 
     # ---------- one mouth: parse intent, compose, answer ----------
     def ask(self, text):
@@ -185,6 +233,8 @@ class TheBrain:
 
 
 def main():
+    if "--lifelong" in sys.argv:
+        TheBrain().lifelong(); return
     b = TheBrain()
     fresh = not b.load()
     if fresh:
