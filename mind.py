@@ -114,6 +114,8 @@ def dispatch(prompt):
         return sh([GEN_PY, "spectral.py"])
     if any(k in p for k in ("hyperbolic", "hierarchy", "taxonomy", "geometry")):
         return sh([GEN_PY, "geometry.py"])
+    if any(k in p for k in ("primitive", "compose", "compound", "library")):
+        return sh([GEN_PY, "primitives.py"])
     if any(k in p for k in ("brain", "transfer", "single brain")):
         return sh([GEN_PY, "brain.py"])
     if any(k in p for k in ("language", "wikitext", "induction", "coreference",

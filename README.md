@@ -174,6 +174,37 @@ Honest line: it does the *lookups and local procedures* of science (genetic
 code, complements, mass accumulation) and *searches* the hard combinatorial
 ones (folding) — it does not reason them out. That's the brain we built.
 
+## One compounding brain (`brain.py`, `primitives.py`)
+
+All learning goes into *one* shared model, and it compounds — but only the
+right way, which we measured:
+
+- **Accumulation, no forgetting**: one model holds addition + multiplication +
+  the genetic code at 100% each. Counts add, they don't overwrite — so unlike a
+  backprop net, it never catastrophically forgets.
+- **Transfer needs *identical* primitives, not similarity**: co-training
+  addition with multiplication (similar-looking, different-meaning steps)
+  *hurt* by 10 points. But the single-digit carry fact, which multi-digit
+  addition literally *is* a chain of, transfers **+100 points** (multi-digit
+  addition works at 100% with zero multi-digit examples).
+- **So we built a primitive library**: a registry of atomic shared ops
+  (`a` digit-add, `m` multiply-accumulate, `p` complement, `r` transcribe,
+  `g` codon), each learned once into one brain. Every skill is a *composition*
+  of primitive queries:
+
+```
+taught 1,272 atomic primitive facts, ZERO full-skill examples:
+  add (4-digit)        100%   [composes 'a']
+  multiply (x4-digit)   94%   [composes 'm']
+  transcribe (40 base) 100%   [composes 'r']
+  rev-complement       100%   [composes 'p']
+  translate protein    100%   [composes 'g']
+  NEW skill "sum a list" reusing 'a', no new training: 100%
+```
+
+Learning a primitive benefits every skill that composes it; new skills that
+reuse primitives are free. That's how the brain compounds — backprop-free.
+
 ## What's in the box
 
 ```

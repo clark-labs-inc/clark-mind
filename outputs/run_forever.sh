@@ -29,6 +29,9 @@ while [[ ! -e outputs/STOP ]]; do
   if [[ ! -e outputs/STOP ]]; then
     echo "##### PASS $n PRACTICE #####" >> $log
     python3 one_mind.py >> $log 2>&1 || echo "PRACTICE one_mind FAILED" >> $log
+    # the COMPOUNDING brain: one shared model, all skills composed from a
+    # primitive library (add/multiply/biology emerge from atomic ops)
+    python3 primitives.py >> $log 2>&1 || echo "PRACTICE primitives FAILED" >> $log
     python3 science.py >> $log 2>&1 || echo "PRACTICE science FAILED" >> $log
     python3 lessons_think.py >> $log 2>&1 || echo "PRACTICE think FAILED" >> $log
     python3 lessons_skills.py >> $log 2>&1 || echo "PRACTICE skills FAILED" >> $log
