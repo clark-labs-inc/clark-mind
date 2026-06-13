@@ -114,6 +114,9 @@ def dispatch(prompt):
         return sh([GEN_PY, "spectral.py"])
     if any(k in p for k in ("hyperbolic", "hierarchy", "taxonomy", "geometry")):
         return sh([GEN_PY, "geometry.py"])
+    if any(k in p for k in ("language", "wikitext", "induction", "coreference",
+                            "bpc", "llm")):
+        return sh([GEN_PY, "language.py"])         # bpc scaling + fetch induction
     if any(k in p for k in ("play", "arc", " game", "level")) or \
             any(t in GAMES for t in re.findall(r"[a-z][a-z0-9]{3}", p)):
         return act(prompt)
