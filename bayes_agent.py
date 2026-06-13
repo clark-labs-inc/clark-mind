@@ -86,6 +86,11 @@ class BayesAgent:
         self.gpos = defaultdict(int)         # action -> score events (root prior)
         self.gn = defaultdict(int)
         self.last = {}                       # recency for the resource bound
+        self.last_state = {}                 # sig -> step last visited
+        self.plan_cap = 1500                 # states value-iterated per sample
+        self._mc = {}                        # per-pass _mean_chain memo
+        self._cV = {}                        # warm-start coarse values per level
+        self.min_episode = 20                # min steps between world samples
         self.max_pairs = max_pairs
         self.t = 0
         # episode state (PSRL)
@@ -127,16 +132,23 @@ class BayesAgent:
             self.states.add(next_sig)
         self.t += 1
         self.last[(sig, a)] = self.t
+        self.last_state[sig] = self.t        # state recency for bounded planning
         # UCRL2 episode rule, snapshot-free: with nu = visits since the last
         # world sample, pre-sample history is n - nu and the episode ends
         # when nu doubles it. A pair's FIRST visit never ends the episode
         # (sweeps through novelty stay replan-free; act() handles new states
         # with a one-step draw) -- but its SECOND within-episode visit can:
         # revisiting under one frozen sample means the policy is looping.
+        # ...subject to a minimum episode length: realizing a sampled world
+        # costs ~1s at scale, and the doubling rule thrashes when counts are
+        # small (resampling every few steps). UCRL permits ending an episode
+        # LATER than the doubling point (it stays a valid optimistic schedule);
+        # a min length bounds worst-case replans/session without changing the
+        # asymptotic regret regime. min_episode=0 recovers textbook UCRL2.
         k = (sig, a)
         self.ep_nu[k] += 1
         nu, n = self.ep_nu[k], self.levels[0].n.get(k, 0)
-        if nu >= 2 and 2 * nu >= n:
+        if nu >= 2 and 2 * nu >= n and self.t - self.plan_t >= self.min_episode:
             self.policy = {}
         if self.max_pairs and len(self.levels[0].n) > self.max_pairs:
             self.sleep()
@@ -162,7 +174,14 @@ class BayesAgent:
         return float(self.rng.beta(max(a1, 1e-6), max(b1, 1e-6)))
 
     def _mean_chain(self, level_i, s, a):
-        """Posterior mean of P(score) at (s,a,level i), prior chained up."""
+        """Posterior mean of P(score) at (s,a,level i), prior chained up.
+        Memoized within a planning pass: counts don't change during planning,
+        and the coarse levels query the same (level,sig,a) thousands of times
+        (886k -> a few k calls; the dominant cost on big-state games)."""
+        ck = (level_i, s, a)
+        c = self._mc.get(ck)
+        if c is not None:
+            return c
         m = (self.gpos[a] + ALPHA) / (self.gn[a] + 2 * ALPHA)
         keys = []
         cur = s
@@ -175,6 +194,7 @@ class BayesAgent:
             lv = self.levels[j]
             n, p = lv.n.get((ks, a), 0), lv.pos.get((ks, a), 0)
             m = (p + ALPHA * m) / (n + ALPHA)
+        self._mc[ck] = m
         return m
 
     def _sample_world(self):
@@ -187,7 +207,16 @@ class BayesAgent:
         the root escapes to the UNKNOWN closure."""
         gamma = self.gamma
         L = len(self.levels)
+        self._mc = {}                        # fresh memo: counts frozen this pass
+        # PSRL plans the MDP it can actually traverse this episode: value-
+        # iterate only the RECENTLY-VISITED component (warm-start retains the
+        # rest, and the coarse levels carry long-range value as escape Q).
+        # This bounds per-sample cost by plan_cap regardless of total brain
+        # size -- the difference between 35-min and seconds on big-state games.
         fine_states = [s for s in self.states if s in self.avail]
+        if len(fine_states) > self.plan_cap:
+            fine_states.sort(key=lambda s: self.last_state.get(s, 0), reverse=True)
+            fine_states = fine_states[:self.plan_cap]
         if not fine_states:
             return
         lvl_states = [set() for _ in range(L)]
@@ -229,7 +258,13 @@ class BayesAgent:
                     Ig[k] = 1.0 / (lv.n.get(k, 0) + 1.0)
                     Esc[k] = ((Qr_up.get((up, a), vu_r), Qi_up.get((up, a), vu_i))
                               if up is not None else (vu_r, vu_i))
-            Vr, Vi = {}, {}
+            # warm-start coarse value iteration from the previous pass: the
+            # sampled world barely moves between samples, so a few sweeps
+            # suffice instead of 40-from-zero (coarse VI is the dominant cost
+            # on big-state games once the fine level is vectorized).
+            cV = self._cV.setdefault(i, ({}, {}))
+            Vr = {s: cV[0].get(s, 0.0) for s in states}
+            Vi = {s: cV[1].get(s, 0.0) for s in states}
             for which, (V, R) in enumerate(((Vr, Rw), (Vi, Ig))):
                 for _ in range(40):
                     delta = 0.0
@@ -248,6 +283,7 @@ class BayesAgent:
                         V[s] = best
                     if delta < 1e-4:
                         break
+            self._cV[i] = (Vr, Vi)           # carry to the next pass
             Qr, Qi = {}, {}
             for s in states:
                 for a in lvl_acts[i][s]:
@@ -344,6 +380,7 @@ class BayesAgent:
         posterior draw per action against the current plan's values is the
         same decision rule at depth one (escape resolves to the coarser
         level's sampled Q, exactly as in the full plan)."""
+        self._mc = {}
         h = self.sighier.get(sig, (sig,))
         up = h[1] if len(h) > 1 else None
         while len(self._parents) < max(1, len(h)):
@@ -417,6 +454,9 @@ class BayesAgent:
         self.states |= d["states"]; self.mag = d["mag"]; self.magn = d["magn"]
         self.gpos.update(d["gpos"]); self.gn.update(d["gn"])
         self.t = d["t"]; self.last.update(d["last"])
+        for (s, _a), tt in self.last.items():    # rebuild state recency
+            if tt > self.last_state.get(s, 0):
+                self.last_state[s] = tt
 
 
 class BayesHabituator:
