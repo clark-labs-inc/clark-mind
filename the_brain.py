@@ -208,6 +208,48 @@ class TheBrain:
         return 100 * np.mean([self.cortex.predict(XS[j]).argmax() == Y[j]
                               for j in range(n)])
 
+    def _mnist_test8(self, n=300, rot=0):
+        """Held-out MNIST TEST split (never trained on), optionally rotated for
+        a distribution-shift OOD probe. Cached per rot."""
+        key = f"_mt{rot}"
+        if not hasattr(self, key):
+            from torchvision.datasets import MNIST
+            from PIL import Image
+            mn = MNIST(root="./data", train=False, download=True)
+            X = mn.data.numpy().astype(np.float32) / 255.0; Y = mn.targets.numpy()
+            xs = []
+            for i in range(n):
+                im = Image.fromarray(np.uint8(X[i] * 255))
+                if rot:
+                    im = im.rotate(rot, resample=Image.BILINEAR)
+                xs.append(np.asarray(im.resize((8, 8)), np.float32).ravel() / 255.0)
+            setattr(self, key, (np.stack(xs), Y[:n]))
+        return getattr(self, key)
+
+    def ood_eval(self):
+        """HELD-OUT / OUT-OF-DISTRIBUTION probes -- generalization, not memory.
+        Fast (~seconds), run between lifelong steps to watch generalizable
+        intelligence over training."""
+        r = np.random.default_rng(self.read_pos & 0xffff)
+        # arithmetic LENGTH-EXTRAPOLATION: compose primitives on big numbers
+        na = 15
+        ok = 0
+        for _ in range(na):
+            a = int(r.integers(10**5, 10**7)); b = int(r.integers(10**5, 10**7))
+            ok += (self.add(a, b) == a + b)
+        add_big = 100 * ok / na
+        ok = 0
+        for _ in range(na):
+            d = int(r.integers(2, 10)); n = int(r.integers(10**5, 10**7))
+            ok += (self.mul(d, n) == d * n)
+        mul_big = 100 * ok / na
+        # vision: held-out TEST split, and rotated (distribution shift)
+        Xt, Yt = self._mnist_test8(300, rot=0)
+        vt = 100 * np.mean([self.cortex.predict(Xt[j]).argmax() == Yt[j] for j in range(len(Yt))])
+        Xr, Yr = self._mnist_test8(300, rot=25)
+        vr = 100 * np.mean([self.cortex.predict(Xr[j]).argmax() == Yr[j] for j in range(len(Yr))])
+        return dict(add_big=add_big, mul_big=mul_big, vis_heldout=vt, vis_rot25=vr)
+
     # ---------- semantics: meaning = spectral factorization of the counts ----------
     def build_semantics(self, V=4000):
         """Turn local co-occurrence into a SEMANTIC space (SVD of PPMI). This is
@@ -397,6 +439,7 @@ class TheBrain:
                 self.cortex.train_step(cortex_X[i], oh)
             rec = self.cortex_eval(300)
             bpc = self.heldout_bpc(test); fac = self.faculty_check()
+            ood = self.ood_eval()                              # held-out / OOD probe
             slept = ""
             if cyc % 20 == 0 and self.psc.size() > MAX_CTX:    # SLEEP: bound memory
                 before = self.psc.size()
@@ -405,7 +448,9 @@ class TheBrain:
             line = (f"cycle {cyc}: txt {self.read_pos//1000}k  img {self.images_seen}  "
                     f"aud {self.audio_seen}  vid {self.video_seen}  "
                     f"bpc {bpc:.2f}  cortex {rec:.0f}%  fac {sum(fac.values())}/5"
-                    f"  ctx {self.psc.size()//1000}k{slept}")
+                    f"  ctx {self.psc.size()//1000}k{slept}  "
+                    f"OOD[add+ {ood['add_big']:.0f} mul+ {ood['mul_big']:.0f} "
+                    f"vis {ood['vis_heldout']:.0f} vis_rot {ood['vis_rot25']:.0f}]")
             print(line); log.write(line + "\n"); log.flush()
             self.save()
 
