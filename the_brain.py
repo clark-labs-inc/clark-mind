@@ -28,6 +28,7 @@ from predictive_coding import PredictiveCoding      # the free-energy deep facul
 np.seterr(over="ignore", invalid="ignore", divide="ignore")
 RNG = random.Random(0)
 PATH = "outputs/the_brain.pkl"
+MAX_CTX = 3_000_000          # context budget; sleep consolidates back to it
 COMP = {"A": "T", "T": "A", "C": "G", "G": "C"}
 T2U = {"A": "A", "C": "C", "G": "G", "T": "U"}
 _B = "ACGT"
@@ -396,9 +397,15 @@ class TheBrain:
                 self.cortex.train_step(cortex_X[i], oh)
             rec = self.cortex_eval(300)
             bpc = self.heldout_bpc(test); fac = self.faculty_check()
+            slept = ""
+            if cyc % 20 == 0 and self.psc.size() > MAX_CTX:    # SLEEP: bound memory
+                before = self.psc.size()
+                self.psc.consolidate(MAX_CTX, decay=0.97)
+                slept = f"  [slept {before:,}->{self.psc.size():,}]"
             line = (f"cycle {cyc}: txt {self.read_pos//1000}k  img {self.images_seen}  "
                     f"aud {self.audio_seen}  vid {self.video_seen}  "
-                    f"bpc {bpc:.2f}  cortex {rec:.0f}%  fac {sum(fac.values())}/5")
+                    f"bpc {bpc:.2f}  cortex {rec:.0f}%  fac {sum(fac.values())}/5"
+                    f"  ctx {self.psc.size()//1000}k{slept}")
             print(line); log.write(line + "\n"); log.flush()
             self.save()
 

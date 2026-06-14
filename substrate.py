@@ -32,6 +32,51 @@ class UniversalPSC:
                     d = self.t[j].setdefault((G, posk, tuple(vals[:j])), {})
                     d[value] = d.get(value, 0) + 1
 
+    def size(self):
+        return sum(len(tj) for tj in self.t)
+
+    def consolidate(self, budget, decay=0.97):
+        """SLEEP: bound the model by forgetting what it can RECONSTRUCT from
+        backoff. Novel math for a backoff count model: a depth-j context is
+        predictively REDUNDANT if its next-symbol distribution matches its
+        depth-(j-1) backoff (Jensen-Shannon ~ 0) -- deleting it costs almost
+        nothing because prediction falls back to the parent. Score each context
+        by usage-weighted JS-from-backoff; decay counts (temporal forgetting);
+        evict the lowest-scoring deepest contexts until size <= budget. The
+        unbounded n-gram model self-prunes into a bounded variable-order /
+        causal-state model, keeping exactly the information-bearing contexts."""
+        for tj in self.t:                                    # temporal decay
+            for ctx in list(tj):
+                d = tj[ctx]
+                for v in list(d):
+                    d[v] *= decay
+                    if d[v] < 0.5:
+                        del d[v]
+                if not d:
+                    del tj[ctx]
+        if self.size() <= budget:
+            return
+        def js(d, par):                                      # weighted JS divergence
+            keys = set(d) | set(par)
+            sd = sum(d.values()); sp = sum(par.values())
+            div = 0.0
+            for k in keys:
+                p = d.get(k, 0) / sd; q = par.get(k, 0) / sp; m = 0.5*(p+q)
+                if p > 0: div += 0.5*p*math.log(p/m)
+                if q > 0: div += 0.5*q*math.log(q/m)
+            return div
+        cand = []
+        for j in range(len(self.t) - 1, 0, -1):              # deepest first
+            tj, tp = self.t[j], self.t[j-1]
+            for ctx, d in tj.items():
+                G, posk, vt = ctx
+                par = tp.get((G, posk, vt[:-1]))
+                score = 1e18 if par is None else sum(d.values()) * js(d, par)
+                cand.append((score, j, ctx))                 # low score = redundant
+        cand.sort(key=lambda x: x[0])
+        for _, j, ctx in cand[:self.size() - budget]:
+            self.t[j].pop(ctx, None)
+
     def _interp(self, p, d):
         a = np.full(self.K, self.alpha)
         for k, v in d.items(): a[k] += v
