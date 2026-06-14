@@ -21,7 +21,7 @@ Run:  python3 the_brain.py            -> grows, persists, runs a mixed battery
 from __future__ import annotations
 import os, re, sys, math, pickle, random, numpy as np
 from substrate import UniversalPSC, _sample
-from psc_omni import VOCAB, VIS0, KV, BOS, EOS, SEP, txt, WORD
+from psc_omni import VOCAB, VIS0, KV, AUD0, KA, BOS, EOS, SEP, FRAME, txt, WORD, kmeans
 from assoc_memory import AssocMemory
 from predictive_coding import PredictiveCoding      # the free-energy deep faculty
 
@@ -43,6 +43,8 @@ class TheBrain:
         self.taught = set()
         self.read_pos = 0                                # chars of text ingested
         self.images_seen = 0                             # cifar images ingested
+        self.audio_seen = 0; self.video_seen = 0
+        self.aud_C = None; self.aud_mu = None; self.aud_sd = None   # audio codec
         self.sem = None                                  # semantic embeddings (SVD of PPMI)
         self.sem_vocab = []; self.sem_idx = {}
         self.cortex = None                               # predictive-coding deep learner
@@ -158,7 +160,9 @@ class TheBrain:
                          "K": self.mem.K, "V": self.mem.V, "cod": self.cod,
                          "read_pos": self.read_pos, "sem": self.sem,
                          "sem_vocab": self.sem_vocab, "sem_idx": self.sem_idx,
-                         "cortex": self.cortex, "images_seen": self.images_seen}, f)
+                         "cortex": self.cortex, "images_seen": self.images_seen,
+                         "audio_seen": self.audio_seen, "video_seen": self.video_seen,
+                         "aud_C": self.aud_C, "aud_mu": self.aud_mu, "aud_sd": self.aud_sd}, f)
         os.replace(PATH + ".tmp", PATH)                      # never a truncated read
 
     def load(self):
@@ -171,6 +175,8 @@ class TheBrain:
         self.sem = d.get("sem"); self.sem_vocab = d.get("sem_vocab", [])
         self.sem_idx = d.get("sem_idx", {})
         self.cortex = d.get("cortex"); self.images_seen = d.get("images_seen", 0)
+        self.audio_seen = d.get("audio_seen", 0); self.video_seen = d.get("video_seen", 0)
+        self.aud_C = d.get("aud_C"); self.aud_mu = d.get("aud_mu"); self.aud_sd = d.get("aud_sd")
         return True
 
     # ---------- cortex: deep nonlinear learning by free-energy descent ----------
@@ -230,6 +236,59 @@ class TheBrain:
         return [self.sem_vocab[i] for i in np.argsort(-s)
                 if self.sem_vocab[i] not in seen][:n]
 
+    # ---------- audio: mel-spectrogram -> codebook tokens (no torchcodec) ----------
+    def grow_audio_codec(self, n=60):
+        import io, soundfile as sf, librosa
+        from datasets import load_dataset, Audio
+        ds = load_dataset("openslr/librispeech_asr", split="train.clean.100",
+                          streaming=True).cast_column("audio", Audio(decode=False))
+        frames = []
+        for ex in iter(ds):
+            try:
+                w, sr = sf.read(io.BytesIO(ex["audio"]["bytes"]))
+                if w.ndim > 1: w = w.mean(1)
+                m = librosa.feature.melspectrogram(y=w.astype(float), sr=sr,
+                                                   n_mels=32, hop_length=sr//10)
+                frames.append(np.log(m + 1e-6).T)
+            except Exception:
+                pass
+            if len(frames) >= n: break
+        F = np.concatenate(frames)
+        self.aud_mu = F.mean(0); self.aud_sd = F.std(0) + 1e-6
+        self.aud_C = kmeans((F - self.aud_mu) / self.aud_sd, KA)
+
+    def aud_tokens(self, w, sr, cap=40):
+        import librosa
+        if w.ndim > 1: w = w.mean(1)
+        m = librosa.feature.melspectrogram(y=w.astype(float), sr=sr, n_mels=32,
+                                           hop_length=sr//10)
+        lm = (np.log(m + 1e-6).T - self.aud_mu) / self.aud_sd
+        codes = ((lm[:, None] - self.aud_C[None])**2).sum(2).argmin(1)[:cap]
+        return [AUD0 + int(c) for c in codes]
+
+    def video_frames(self, url, k=3):
+        """Download an mp4 and ffmpeg-extract k grayscale 32x32 frames -> vision
+        codes (torchcodec is broken, so we shell out to ffmpeg)."""
+        import urllib.request, subprocess, tempfile, os
+        from PIL import Image
+        d = tempfile.mkdtemp()
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            open(f"{d}/v.mp4", "wb").write(urllib.request.urlopen(req, timeout=15).read())
+            subprocess.run(["ffmpeg", "-y", "-i", f"{d}/v.mp4", "-vf",
+                            "scale=32:32", "-vframes", str(k), f"{d}/f%02d.png"],
+                           capture_output=True, timeout=30)
+            out = []
+            for fn in sorted(os.listdir(d)):
+                if fn.endswith(".png"):
+                    g = np.asarray(Image.open(f"{d}/{fn}").convert("L"), np.float32)/255.0
+                    out.append(list(self.cod.vis_enc(g)))
+            return out[:k]
+        except Exception:
+            return []
+        finally:
+            import shutil; shutil.rmtree(d, ignore_errors=True)
+
     # ---------- lifelong: the one brain keeps READING (genuine growth) ----------
     def ingest_text(self, chunk):
         self._teach([[BOS] + [b for b in chunk.encode()] + [EOS]])
@@ -266,50 +325,80 @@ class TheBrain:
             self.build_semantics(); self.save()
         if self.cortex is None:
             self.grow_cortex(); self.save()
+        if self.aud_C is None:
+            print("fitting audio codec (mel -> codebook) ..."); self.grow_audio_codec(); self.save()
+        import io, soundfile as sf
+        from datasets import Audio
         cortex_X, cortex_Y = self._mnist8(4000)
         test = open("data/wiki_train.txt", errors="replace").read()[-test_n:-test_n+4000]
         LBL = ["airplane","automobile","bird","cat","deer","dog","frog","horse","ship","truck"]
-        txt_it = iter(load_dataset("allenai/c4", "en", split="train", streaming=True)
-                      .shuffle(buffer_size=1000, seed=int(time.time())))
-        img_it = iter(load_dataset("cifar10", split="train", streaming=True)
-                      .shuffle(buffer_size=2000, seed=int(time.time())))
+        S0 = lambda **k: dict(streaming=True, **k)
+        txt_it = iter(load_dataset("allenai/c4","en",split="train",streaming=True).shuffle(buffer_size=1000, seed=int(time.time())))
+        img_it = iter(load_dataset("cifar10",split="train",streaming=True).shuffle(buffer_size=2000, seed=int(time.time())))
+        spe_it = iter(load_dataset("openslr/librispeech_asr",split="train.clean.100",streaming=True).cast_column("audio",Audio(decode=False)))
+        snd_it = iter(load_dataset("ashraq/esc50",split="train",streaming=True).cast_column("audio",Audio(decode=False)))
+        vid_it = iter(load_dataset("TempoFunk/webvid-10M",split="train",streaming=True))
         log = open("outputs/brain_life.out", "a")
         cyc = 0
-        print("FULL multimodal lifelong (c4 text stream + cifar images); "
-              "stop: touch outputs/STOP")
+        print("FULL multimodal lifelong: text(c4) + image(cifar) + audio(speech/"
+              "sound) + video(webvid). stop: touch outputs/STOP")
+        def nxt(it):
+            try: return next(it)
+            except Exception: return None
         while not os.path.exists("outputs/STOP"):
             cyc += 1
             # ---- TEXT: unlimited web stream ----
             buf = ""
-            try:
-                while len(buf) < chunk:
-                    buf += next(txt_it)["text"] + "\n"
-            except StopIteration:
-                txt_it = iter(load_dataset("allenai/c4", "en", split="train",
-                              streaming=True).shuffle(buffer_size=1000, seed=cyc))
+            for _ in range(2000):
+                e = nxt(txt_it)
+                if e is None: break
+                buf += e["text"] + "\n"
+                if len(buf) >= chunk: break
             self.ingest_text(buf[:chunk]); self.read_pos += len(buf[:chunk])
-            # ---- IMAGE + label pairing: full cifar over time ----
-            nimg = 0
-            for _ in range(150):
-                try:
-                    ex = next(img_it)
-                except Exception:
-                    break
-                g = np.asarray(ex["img"].convert("L").resize((32, 32)),
-                               np.float32) / 255.0
-                toks = list(self.cod.vis_enc(g))
-                self._teach([[BOS] + txt(f"img {LBL[ex['label']]} ") + [SEP] + toks + [EOS]])
-                nimg += 1
-            self.images_seen += nimg
-            # ---- deep cortex recognition keeps learning ----
+            # ---- IMAGE + label (image/text) ----
+            ni = 0
+            for _ in range(120):
+                ex = nxt(img_it)
+                if ex is None: break
+                g = np.asarray(ex["img"].convert("L").resize((32, 32)), np.float32)/255.0
+                self._teach([[BOS]+txt(f"img {LBL[ex['label']]} ")+[SEP]+list(self.cod.vis_enc(g))+[EOS]])
+                ni += 1
+            self.images_seen += ni
+            # ---- AUDIO + text: speech (transcript) + sound (category) ----
+            na = 0
+            for it, kw, lab in ((spe_it, "say", "text"), (snd_it, "sound", "category")):
+                for _ in range(12):
+                    ex = nxt(it)
+                    if ex is None: break
+                    try:
+                        w, sr = sf.read(io.BytesIO(ex["audio"]["bytes"]))
+                        tks = self.aud_tokens(np.asarray(w), sr)
+                        cap = str(ex.get(lab, ""))[:40].lower()
+                        self._teach([[BOS]+txt(f"{kw} {cap} ")+[SEP]+tks+[EOS]])
+                        na += 1
+                    except Exception:
+                        pass
+            self.audio_seen += na
+            # ---- VIDEO + text: webvid frames + caption ----
+            nv = 0
+            for _ in range(2):
+                ex = nxt(vid_it)
+                if ex is None: break
+                frames = self.video_frames(ex.get("contentUrl", ""), k=3)
+                if frames:
+                    seq = [BOS]+txt(f"video {str(ex.get('name',''))[:40].lower()} ")+[SEP]
+                    for fr in frames: seq += [FRAME]+fr
+                    self._teach([seq+[EOS]]); nv += 1
+            self.video_seen += nv
+            # ---- deep cortex keeps learning ----
             for i in np.random.default_rng(cyc).permutation(len(cortex_X))[:800]:
                 oh = np.full(10, -1.0); oh[cortex_Y[i]] = 1.0
                 self.cortex.train_step(cortex_X[i], oh)
             rec = self.cortex_eval(300)
             bpc = self.heldout_bpc(test); fac = self.faculty_check()
-            line = (f"cycle {cyc}: c4 {self.read_pos:,} chars  cifar {self.images_seen:,} imgs  "
-                    f"heldout {bpc:.3f} bpc  cortex {rec:.0f}%  "
-                    f"faculties {sum(fac.values())}/5")
+            line = (f"cycle {cyc}: txt {self.read_pos//1000}k  img {self.images_seen}  "
+                    f"aud {self.audio_seen}  vid {self.video_seen}  "
+                    f"bpc {bpc:.2f}  cortex {rec:.0f}%  fac {sum(fac.values())}/5")
             print(line); log.write(line + "\n"); log.flush()
             self.save()
 
