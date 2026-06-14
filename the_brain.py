@@ -42,6 +42,7 @@ class TheBrain:
         self.cod = None                                  # vision codec (lazy)
         self.taught = set()
         self.read_pos = 0                                # chars of text ingested
+        self.images_seen = 0                             # cifar images ingested
         self.sem = None                                  # semantic embeddings (SVD of PPMI)
         self.sem_vocab = []; self.sem_idx = {}
         self.cortex = None                               # predictive-coding deep learner
@@ -157,7 +158,7 @@ class TheBrain:
                          "K": self.mem.K, "V": self.mem.V, "cod": self.cod,
                          "read_pos": self.read_pos, "sem": self.sem,
                          "sem_vocab": self.sem_vocab, "sem_idx": self.sem_idx,
-                         "cortex": self.cortex}, f)
+                         "cortex": self.cortex, "images_seen": self.images_seen}, f)
         os.replace(PATH + ".tmp", PATH)                      # never a truncated read
 
     def load(self):
@@ -169,7 +170,7 @@ class TheBrain:
         self.read_pos = d.get("read_pos", 0)
         self.sem = d.get("sem"); self.sem_vocab = d.get("sem_vocab", [])
         self.sem_idx = d.get("sem_idx", {})
-        self.cortex = d.get("cortex")
+        self.cortex = d.get("cortex"); self.images_seen = d.get("images_seen", 0)
         return True
 
     # ---------- cortex: deep nonlinear learning by free-energy descent ----------
@@ -251,39 +252,64 @@ class TheBrain:
         return dict(add=a, mul=m, transcribe=t, name=n, recall=r)
 
     def lifelong(self, chunk=40000, test_n=15000):
+        """FULL-SCALE multimodal lifelong learning into the ONE brain:
+        - TEXT: stream allenai/c4 (web text, effectively unlimited) -> genuine,
+          unbounded language growth (no 2MB plateau).
+        - IMAGE + IMAGE/TEXT: stream all of cifar10, encode each image to vision
+          tokens paired with its label word ('img <label> SEP <codes>').
+        - deep cortex keeps training (recognition). All in one persistent model."""
+        import time
+        from datasets import load_dataset
         if not self.load():
             print("growing the one brain ..."); self.grow(vision=True); self.save()
         if self.sem is None:
-            print("building semantic space (SVD of co-occurrence) ...")
             self.build_semantics(); self.save()
         if self.cortex is None:
-            print("growing the predictive-coding cortex (deep recognition) ...")
             self.grow_cortex(); self.save()
         cortex_X, cortex_Y = self._mnist8(4000)
-        corpus = open("data/wiki_train.txt", errors="replace").read()
-        test = corpus[-test_n:-test_n + 4000]
-        train_end = max(1, len(corpus) - test_n)
+        test = open("data/wiki_train.txt", errors="replace").read()[-test_n:-test_n+4000]
+        LBL = ["airplane","automobile","bird","cat","deer","dog","frog","horse","ship","truck"]
+        txt_it = iter(load_dataset("allenai/c4", "en", split="train", streaming=True)
+                      .shuffle(buffer_size=1000, seed=int(time.time())))
+        img_it = iter(load_dataset("cifar10", split="train", streaming=True)
+                      .shuffle(buffer_size=2000, seed=int(time.time())))
         log = open("outputs/brain_life.out", "a")
         cyc = 0
-        print("lifelong single-brain learning (reads more each cycle); "
+        print("FULL multimodal lifelong (c4 text stream + cifar images); "
               "stop: touch outputs/STOP")
         while not os.path.exists("outputs/STOP"):
             cyc += 1
-            start = self.read_pos % max(1, train_end - chunk)
-            self.ingest_text(corpus[start:start + chunk])
-            self.read_pos += chunk
-            bpc = self.heldout_bpc(test)
-            # the cortex keeps learning too: a deep-recognition training pass
+            # ---- TEXT: unlimited web stream ----
+            buf = ""
+            try:
+                while len(buf) < chunk:
+                    buf += next(txt_it)["text"] + "\n"
+            except StopIteration:
+                txt_it = iter(load_dataset("allenai/c4", "en", split="train",
+                              streaming=True).shuffle(buffer_size=1000, seed=cyc))
+            self.ingest_text(buf[:chunk]); self.read_pos += len(buf[:chunk])
+            # ---- IMAGE + label pairing: full cifar over time ----
+            nimg = 0
+            for _ in range(150):
+                try:
+                    ex = next(img_it)
+                except Exception:
+                    break
+                g = np.asarray(ex["img"].convert("L").resize((32, 32)),
+                               np.float32) / 255.0
+                toks = list(self.cod.vis_enc(g))
+                self._teach([[BOS] + txt(f"img {LBL[ex['label']]} ") + [SEP] + toks + [EOS]])
+                nimg += 1
+            self.images_seen += nimg
+            # ---- deep cortex recognition keeps learning ----
             for i in np.random.default_rng(cyc).permutation(len(cortex_X))[:800]:
                 oh = np.full(10, -1.0); oh[cortex_Y[i]] = 1.0
                 self.cortex.train_step(cortex_X[i], oh)
             rec = self.cortex_eval(300)
-            fac = self.faculty_check()
-            kept = sum(fac.values())
-            line = (f"cycle {cyc}: read {self.read_pos:,} chars  "
-                    f"heldout {bpc:.3f} bpc  cortex {rec:.0f}% recog  "
-                    f"faculties {kept}/5 "
-                    f"{''.join('.' if v else 'X' for v in fac.values())}")
+            bpc = self.heldout_bpc(test); fac = self.faculty_check()
+            line = (f"cycle {cyc}: c4 {self.read_pos:,} chars  cifar {self.images_seen:,} imgs  "
+                    f"heldout {bpc:.3f} bpc  cortex {rec:.0f}%  "
+                    f"faculties {sum(fac.values())}/5")
             print(line); log.write(line + "\n"); log.flush()
             self.save()
 
