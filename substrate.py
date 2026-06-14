@@ -35,6 +35,39 @@ class UniversalPSC:
     def size(self):
         return sum(len(tj) for tj in self.t)
 
+    def _surprise(self, posk, vals, G, val):
+        """Cheap prediction error for a token: -log p(val) under the deepest
+        context that has data (free-energy surprise), without building the full
+        vocab vector."""
+        for j in range(len(self.offsets), -1, -1):
+            d = self.t[j].get((G, posk, tuple(vals[:j])))
+            if d:
+                tot = sum(d.values())
+                p = (d.get(val, 0) + self.alpha) / (tot + self.alpha * self.K)
+                return -math.log(p)
+        return math.log(self.K)                          # never seen -> max surprise
+
+    def learn_stream(self, seq, G=(), grow_thresh=0.35, max_w=4.0):
+        """UNIVERSAL surprise-gated learning (free-energy principle): write
+        proportional to prediction error, and grow depth only where error
+        persists. Predictable tokens barely update (capacity isn't wasted on
+        what's already known = SELECTIVE MEMORY); surprising tokens update
+        strongly; deep contexts are created only when shallower ones fail to
+        predict (controlled, data-driven GROWTH). Works on any modality's token
+        stream -- one rule, no special cases."""
+        E = {(i,): v for i, v in enumerate(seq)}
+        L = len(self.offsets)
+        for i in range(len(seq)):
+            val = seq[i]
+            posk, vals = self._ctx(E, (i,))
+            s = self._surprise(posk, vals, G, val)       # nats of surprise
+            w = min(max_w, 0.15 + s)                      # write weight ~ surprise
+            for j in range(L + 1):
+                if j >= 2 and s < grow_thresh:           # don't grow deep on the predictable
+                    break
+                d = self.t[j].setdefault((G, posk, tuple(vals[:j])), {})
+                d[val] = d.get(val, 0) + w
+
     def consolidate(self, budget, decay=0.97):
         """SLEEP: bound the model by forgetting what it can RECONSTRUCT from
         backoff. Novel math for a backoff count model: a depth-j context is

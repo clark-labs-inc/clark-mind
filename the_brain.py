@@ -50,10 +50,14 @@ class TheBrain:
         self.sem_vocab = []; self.sem_idx = {}
         self.cortex = None                               # predictive-coding deep learner
 
-    # ---------- learning into the ONE model ----------
-    def _teach(self, seqs):
-        self.psc.fit([((len(s),), {(i,): v for i, v in enumerate(s)}, ())
-                      for s in seqs])
+    # ---------- THE single learning path (everything flows through here) ----------
+    def learn(self, seqs):
+        """ONE place all learning enters the model -- innate facts AND every
+        modality's experiential stream alike -- by the universal surprise-gated
+        free-energy rule (write proportional to prediction error => selective
+        memory + controlled growth). No separate paths, no special cases."""
+        for s in seqs:
+            self.psc.learn_stream(s)
 
     def grow(self, vision=True):
         """Populate the one model with the primitive library + language."""
@@ -71,7 +75,7 @@ class TheBrain:
             for b, v in T2U.items(): facts += [f"r {b}={v}"]*40
             for k, v in CODON.items(): facts += [f"g {k}={v}"]*40
             for d in range(10): facts += [f"n {d}={WORD[d]}"]*40
-            self._teach([[BOS]+[c for c in s.encode()]+[EOS] for s in facts])
+            self.learn([[BOS]+[c for c in s.encode()]+[EOS] for s in facts])
             self.taught.add("cog")
         if vision and "vision" not in self.taught:
             self._grow_vision(); self.taught.add("vision")
@@ -87,7 +91,7 @@ class TheBrain:
         self.cod = Codecs(); self.cod.fit(X32, y)
         seqs = [[BOS]+txt(f"draw {int(y[i])}")+[SEP]+list(self.cod.vis_enc(X32[i]))+[EOS]
                 for i in range(n)]
-        self._teach(seqs)
+        self.learn(seqs)
 
     # ---------- one query interface against the ONE model ----------
     def _q(self, prefix, k):
@@ -340,7 +344,7 @@ class TheBrain:
 
     # ---------- lifelong: the one brain keeps READING (genuine growth) ----------
     def ingest_text(self, chunk):
-        self._teach([[BOS] + [b for b in chunk.encode()] + [EOS]])
+        self.learn([[BOS] + [b for b in chunk.encode()] + [EOS]])
 
     def heldout_bpc(self, text):
         ts = [b for b in text.encode()]
@@ -410,7 +414,7 @@ class TheBrain:
                 ex = nxt(img_it)
                 if ex is None: break
                 g = np.asarray(ex["img"].convert("L").resize((32, 32)), np.float32)/255.0
-                self._teach([[BOS]+txt(f"img {LBL[ex['label']]} ")+[SEP]+list(self.cod.vis_enc(g))+[EOS]])
+                self.learn([[BOS]+txt(f"img {LBL[ex['label']]} ")+[SEP]+list(self.cod.vis_enc(g))+[EOS]])
                 ni += 1
             self.images_seen += ni
             # ---- AUDIO + text: speech (transcript) + sound (category) ----
@@ -423,7 +427,7 @@ class TheBrain:
                         w, sr = sf.read(io.BytesIO(ex["audio"]["bytes"]))
                         tks = self.aud_tokens(np.asarray(w), sr)
                         cap = str(ex.get(lab, ""))[:40].lower()
-                        self._teach([[BOS]+txt(f"{kw} {cap} ")+[SEP]+tks+[EOS]])
+                        self.learn([[BOS]+txt(f"{kw} {cap} ")+[SEP]+tks+[EOS]])
                         na += 1
                     except Exception:
                         pass
@@ -437,7 +441,7 @@ class TheBrain:
                 if frames:
                     seq = [BOS]+txt(f"video {str(ex.get('name',''))[:40].lower()} ")+[SEP]
                     for fr in frames: seq += [FRAME]+fr
-                    self._teach([seq+[EOS]]); nv += 1
+                    self.learn([seq+[EOS]]); nv += 1
             self.video_seen += nv
             # ---- deep cortex keeps learning ----
             for i in np.random.default_rng(cyc).permutation(len(cortex_X))[:800]:
